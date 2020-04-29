@@ -6,12 +6,12 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"time"
 )
 import "log"
 import "net/rpc"
 import "hash/fnv"
 import "encoding/json"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -29,12 +29,6 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-type Intermediate struct {
-	Key string
-	Values []string
-}
-
-
 //use ihash(key) % NReduce to choose the reduce
 //task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -42,7 +36,6 @@ func ihash(key string) int {
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
-
 
 //
 // main/mrworker.go calls this function.
@@ -55,22 +48,26 @@ func Worker(mapf func(string, string) []KeyValue,
 	args := Args{}
 	reply := Reply{}
 
-	for  {
-		res := callMaster(&args, &reply)
+	for {
 		args.reqType = AskForTask
+		res := callMaster(&args, &reply)
 
 		if res {
 			if reply.status == TaskAvailable {
-				if reply.taskType == MapTask {
-					err := doMap(reply.filename, reply.taskId, mapf)
-					if err != nil {
-						panic(err)
-					} else {
-						args.reqType = FinishTask
-						callMaster(&args, &reply)
+				switch reply.taskType {
+				case MapTask:
+					result := doMap(reply.filename, reply.taskId, 10, mapf)
+					if result {
+						finishTask(&args, &reply, reply.taskId)
 					}
-				} else if reply.taskType == ReduceTask {
-					doReduce(reply.taskId, reply.taskId, reducef)
+				case ReduceTask:
+					result := doReduce(reply.mapTasks, reply.taskId, reducef)
+					if result {
+						finishTask(&args, &reply, reply.taskId)
+					}
+				default:
+					log.Println("Unknown task type!")
+					time.Sleep(time.Second * 5)
 				}
 			} else if reply.status == AllTaskDone {
 				break
@@ -84,14 +81,60 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func callMaster(args *Args, reply *Reply) bool {
-	return false
+	return call("Master.WorkerHandler", &args, &reply)
 }
 
-func doMap(filename string, taskId int, mapf func(string, string) []KeyValue) error {
+func finishTask(args *Args, reply *Reply, taskId int) {
+	args.taskId = taskId
+	if !callMaster(args, reply) {
+		log.Println("Error sending result to master")
+	}
+}
+
+func doMap(filename string, taskId int, reduceTasks int, mapf func(string, string) []KeyValue) bool {
 	content := readFile(filename)
-	kva := mapf(filename, string(content))
+	kva := mapf(filename, content)
 	sort.Sort(ByKey(kva))
-	intermediateMap := make(map[int][]Intermediate)
+	intermediateMap := make(map[int][][]KeyValue)
+
+	i := 0
+	for i < len(kva) {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+
+		key := kva[i].Key
+		var keyValues []KeyValue
+		for k := i; k < j; k++ {
+			keyValues = append(keyValues, kva[i])
+		}
+
+		reduceId := ihash(key) % reduceTasks
+		intermediateMap[reduceId] = append(intermediateMap[reduceId], keyValues)
+
+		i = j
+	}
+
+	result := toJson(taskId, intermediateMap)
+
+	return result
+}
+
+func doReduce(mapTasks int, taskId int, reducef func(string, []string) string) bool {
+	out, err := os.Create("mr-out-" + strconv.Itoa(taskId))
+	if err != nil {
+		log.Printf("Reduce task %d error creating output file.", taskId)
+		return false
+	}
+
+	var kva []KeyValue
+
+	for i := 0; i < mapTasks; i++ {
+		kva, _ = decodeJson(i, taskId, kva)
+	}
+
+	sort.Sort(ByKey(kva))
 
 	i := 0
 	for i < len(kva) {
@@ -103,30 +146,21 @@ func doMap(filename string, taskId int, mapf func(string, string) []KeyValue) er
 		key := kva[i].Key
 		var values []string
 		for k := i; k < j; k++ {
-			values = append(values, kva[k].Value)
+			values = append(values, kva[i].Value)
 		}
 
-		intermediate := Intermediate{
-			Key: key,
-			Values: values,
+		result := reducef(key, values)
+		_, err := fmt.Fprintf(out, "%v %v\n", key, result)
+		if err != nil {
+			log.Printf("Reduce task %d rror output result.\n", taskId)
+			return false
 		}
 
-		reduceId := ihash(key)
-		intermediateMap[reduceId] = append(intermediateMap[reduceId], intermediate)
 		i = j
 	}
 
-	err := toJson(taskId, intermediateMap)
-
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func doReduce(mapTasks int, taskId int, reducef func(string, []string) string) {
-
+	out.Close()
+	return true
 }
 
 func readFile(filename string) string {
@@ -142,22 +176,65 @@ func readFile(filename string) string {
 	return string(content)
 }
 
-func toJson(taskId int, intermediateMap map[int][]Intermediate) error {
+func toJson(taskId int, intermediateMap map[int][][]KeyValue) bool {
 	for key := range intermediateMap {
-		file, err := os.Create("mr-" + strconv.Itoa(taskId) + "-" + strconv.Itoa(key))
+		filename := "mr-" + strconv.Itoa(taskId) + "-" + strconv.Itoa(key)
 
+		file, err := ioutil.TempFile("", "tmp-*")
 		if err != nil {
-			return err
+			log.Println("Error creating temp file.")
+			return false
 		}
 
 		enc := json.NewEncoder(file)
-		err = enc.Encode(intermediateMap[key])
-		if err != nil {
-			return err
+		for _, keyValues := range intermediateMap[key] {
+			for _, keyValue := range keyValues {
+				err := enc.Encode(keyValue)
+				if err != nil {
+					log.Println("Cannot decode key value: " + keyValue.Key + keyValue.Value + " to Json")
+				}
+			}
 		}
+
+		_, err = os.Stat(filename)
+
+		if err == nil || !os.IsNotExist(err) {
+			return false
+		}
+
+		err = os.Rename(file.Name(), filename)
+		if err != nil {
+			_ = os.Remove(file.Name())
+			log.Println("Failed to rename file")
+			return false
+		}
+
+		_ = file.Close()
 	}
 
-	return nil
+	return true
+}
+
+func decodeJson(index int, taskId int, kva []KeyValue) ([]KeyValue, bool) {
+	filename := "mr-" + strconv.Itoa(index) + "-" + strconv.Itoa(taskId)
+	file, err := os.Open(filename)
+
+	if err != nil {
+		log.Println("File " + filename + " does not exits.")
+		return nil, false
+	}
+
+	dec := json.NewDecoder(file)
+
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err != nil {
+			break
+		}
+		kva = append(kva, kv)
+	}
+
+	return kva, true
 }
 
 //

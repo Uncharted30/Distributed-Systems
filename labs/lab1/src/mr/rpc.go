@@ -53,6 +53,8 @@ type Reply struct {
 	// number of map tasks
 	mapTasks int
 
+	reduceTasks int
+
 	taskId int
 }
 
