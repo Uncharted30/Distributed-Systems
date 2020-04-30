@@ -14,11 +14,16 @@ import "strconv"
 // and reply for an RPC.
 //
 
+// request types
 const AskForTask = 1
 const FinishTask = 2
+
+// master status types
 const TaskAvailable = 3
 const NoTaskAvailable = 4
 const AllTaskDone = 5
+
+// task types
 const MapTask = 6
 const ReduceTask = 7
 
@@ -47,12 +52,13 @@ type Reply struct {
 	// task type, 6: map task, 7: reduce task
 	taskType int
 
-	// input files
+	// input file
 	filename string
 
 	// number of map tasks
 	mapTasks int
 
+	// number of reduce tasks
 	reduceTasks int
 
 	taskId int
