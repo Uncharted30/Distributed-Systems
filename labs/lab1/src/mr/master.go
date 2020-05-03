@@ -2,6 +2,7 @@ package mr
 
 import (
 	"container/list"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -46,12 +47,13 @@ type Master struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (m *Master) WorkerHandler(args *Args, reply *Reply) {
-	if args.reqType == AskForTask {
+func (m *Master) WorkerHandler(args *Args, reply *Reply) error {
+	if args.ReqType == AskForTask {
 		m.assignTask(reply)
 	} else {
-
+		m.finishTask(args)
 	}
+	return nil
 }
 
 // handles workers' request for a task
@@ -60,10 +62,12 @@ func (m *Master) assignTask(reply *Reply) {
 	defer m.mu.Unlock()
 	if m.status == MapStage {
 		m.assignMapTask(reply)
+		fmt.Println("assigned 1 map task")
 	} else if m.status == ReduceStage {
 		m.assignReduceTask(reply)
+		fmt.Println("assigned 1 reduce task")
 	} else {
-		reply.status = AllTaskDone
+		reply.Status = AllTaskDone
 	}
 }
 
@@ -74,15 +78,15 @@ func (m *Master) assignMapTask(reply *Reply) {
 	if m.mapNotAssigned.Len() > 0 {
 		element := m.mapNotAssigned.Front()
 		index := element.Value.(int)
-		reply.status = TaskAvailable
-		reply.taskId = index
-		reply.taskType = MapTask
-		reply.filename = m.mapTasks[index]
+		reply.Status = TaskAvailable
+		reply.TaskId = index
+		reply.TaskType = MapTask
+		reply.Filename = m.mapTasks[index]
 		m.mapInProgress[index] = setValue
 		m.mapNotAssigned.Remove(element)
 		m.checkTask(MapTask, index)
 	} else {
-		reply.status = NoTaskAvailable
+		reply.Status = NoTaskAvailable
 	}
 }
 
@@ -93,14 +97,14 @@ func (m *Master) assignReduceTask(reply *Reply) {
 	if m.reduceNotAssigned.Len() > 0 {
 		element := m.reduceNotAssigned.Front()
 		index := element.Value.(int)
-		reply.status = TaskAvailable
-		reply.taskType = ReduceTask
-		reply.taskId = index
+		reply.Status = TaskAvailable
+		reply.TaskType = ReduceTask
+		reply.TaskId = index
 		m.reduceInProgress[index] = setValue
 		m.reduceNotAssigned.Remove(element)
 		m.checkTask(ReduceTask, index)
 	} else {
-		reply.status = NoTaskAvailable
+		reply.Status = NoTaskAvailable
 	}
 }
 
@@ -110,8 +114,10 @@ func (m *Master) finishTask(args *Args) {
 	defer m.mu.Unlock()
 	if m.status == MapStage {
 		m.finishMapTask(args)
+		fmt.Println("finished 1 map task")
 	} else if m.status == ReduceStage {
 		m.finishReduceTask(args)
+		fmt.Println("finished 1 reduce task")
 	}
 }
 
@@ -119,7 +125,7 @@ func (m *Master) finishTask(args *Args) {
 func (m *Master) finishMapTask(args *Args) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.mapInProgress, args.taskId)
+	delete(m.mapInProgress, args.TaskId)
 	m.mapFinished++
 	if m.mapFinished == len(m.mapTasks) {
 		m.status = ReduceStage
@@ -130,7 +136,7 @@ func (m *Master) finishMapTask(args *Args) {
 func (m *Master) finishReduceTask(args *Args) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.reduceInProgress, args.taskId)
+	delete(m.reduceInProgress, args.TaskId)
 	m.reduceFinished++
 	if m.reduceFinished == m.reduceTasks {
 		m.status = FinishedStage
@@ -171,6 +177,9 @@ func (m *Master) Done() bool {
 	ret := false
 
 	// Your code here.
+	if m.reduceFinished == m.reduceTasks {
+		ret = true
+	}
 
 	return ret
 }
@@ -182,7 +191,17 @@ func (m *Master) Done() bool {
 
 func (m *Master) checkTask(taskType int, taskId int) {
 	time.Sleep(time.Second * 10)
-
+	if taskType == MapTask {
+		_, exists := m.mapInProgress[taskId]
+		if exists {
+			m.mapNotAssigned.PushBack(taskId)
+		}
+	} else if taskType == ReduceTask {
+		_, exists := m.reduceInProgress[taskId]
+		if exists {
+			m.reduceNotAssigned.PushBack(taskId)
+		}
+	}
 }
 
 //
@@ -194,6 +213,11 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
 
 	// Your code here.
+	m.mapTasks = files
+	m.reduceTasks = nReduce
+	m.status = MapStage
+	m.reduceFinished = 0
+	m.mapFinished = 0
 
 	m.server()
 	return &m

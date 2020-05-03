@@ -39,29 +39,29 @@ type ExampleReply struct {
 
 type Args struct {
 	// request type, 1: ask for a task, 2: a task is finished
-	reqType int
+	ReqType int
 
-	taskId int
+	TaskId int
 }
 
 type Reply struct {
 
 	// master status, 3: task available, 4: no task available, 5: all tasks are done
-	status int
+	Status int
 
 	// task type, 6: map task, 7: reduce task
-	taskType int
+	TaskType int
 
 	// input file
-	filename string
+	Filename string
 
 	// number of map tasks
-	mapTasks int
+	MapTasks int
 
 	// number of reduce tasks
-	reduceTasks int
+	ReduceTasks int
 
-	taskId int
+	TaskId int
 }
 
 

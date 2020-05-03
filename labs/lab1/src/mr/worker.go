@@ -44,27 +44,27 @@ func Worker(mapf func(string, string) []KeyValue,
 	reply := Reply{}
 
 	for {
-		args.reqType = AskForTask
+		args.ReqType = AskForTask
 		res := callMaster(&args, &reply)
 
 		if res {
-			if reply.status == TaskAvailable {
-				switch reply.taskType {
+			if reply.Status == TaskAvailable {
+				switch reply.TaskType {
 				case MapTask:
-					result := doMap(reply.filename, reply.taskId, 10, mapf)
+					result := doMap(reply.Filename, reply.TaskId, 10, mapf)
 					if result {
-						finishTask(&args, &reply, reply.taskId)
+						finishTask(&args, &reply, reply.TaskId)
 					}
 				case ReduceTask:
-					result := doReduce(reply.mapTasks, reply.taskId, reducef)
+					result := doReduce(reply.MapTasks, reply.TaskId, reducef)
 					if result {
-						finishTask(&args, &reply, reply.taskId)
+						finishTask(&args, &reply, reply.TaskId)
 					}
 				default:
 					log.Println("Unknown task type!")
 					time.Sleep(time.Second * 5)
 				}
-			} else if reply.status == AllTaskDone {
+			} else if reply.Status == AllTaskDone {
 				break
 			} else {
 				time.Sleep(time.Second * 5)
@@ -77,11 +77,11 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func callMaster(args *Args, reply *Reply) bool {
-	return call("Master.WorkerHandler", &args, &reply)
+	return call("Master.WorkerHandler", args, reply)
 }
 
 func finishTask(args *Args, reply *Reply, taskId int) {
-	args.taskId = taskId
+	args.TaskId = taskId
 	if !callMaster(args, reply) {
 		log.Println("Error sending result to master")
 	}
