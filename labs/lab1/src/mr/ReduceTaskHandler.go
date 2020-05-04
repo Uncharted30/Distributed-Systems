@@ -9,10 +9,12 @@ import (
 	"strconv"
 )
 
-func doReduce(mapTasks int, taskId int, reducef func(string, []string) string) bool {
-	out, err := os.Create("mr-out-" + strconv.Itoa(taskId))
-	if err != nil {
-		log.Printf("Reduce task %d error creating output file.", taskId)
+// read intermediate key and values from json file and call reduce function
+// then save final results to mr-out-* files
+func DoReduce(mapTasks int, taskId int, reducef func(string, []string) string) bool {
+	filename := "mr-out-" + strconv.Itoa(taskId)
+	file, res := createTmpFile("reduce")
+	if !res {
 		return false
 	}
 
@@ -34,30 +36,35 @@ func doReduce(mapTasks int, taskId int, reducef func(string, []string) string) b
 		key := kva[i].Key
 		var values []string
 		for k := i; k < j; k++ {
-			values = append(values, kva[i].Value)
+			values = append(values, kva[k].Value)
 		}
 
 		result := reducef(key, values)
-		_, err := fmt.Fprintf(out, "%v %v\n", key, result)
+
+		_, err := fmt.Fprintf(file, "%v %v\n", key, result)
 		if err != nil {
-			log.Printf("Reduce task %d rror output result.\n", taskId)
+			log.Printf("Reduce task %d: error output result.\n", taskId)
 			return false
 		}
 
 		i = j
 	}
 
-	out.Close()
-	return true
+	if fileExists(filename) {
+		return false
+	}
+
+	res = renameFile(file.Name(), filename)
+	return res
 }
 
+// decode json files
 func decodeJson(index int, taskId int, kva []KeyValue) ([]KeyValue, bool) {
 	filename := "mr-" + strconv.Itoa(index) + "-" + strconv.Itoa(taskId)
 	file, err := os.Open(filename)
-
 	if err != nil {
 		log.Println("File " + filename + " does not exits.")
-		return nil, false
+		return kva, false
 	}
 
 	dec := json.NewDecoder(file)

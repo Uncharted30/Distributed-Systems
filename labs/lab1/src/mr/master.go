@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -48,24 +49,27 @@ type Master struct {
 
 // Your code here -- RPC handlers for the worker to call.
 func (m *Master) WorkerHandler(args *Args, reply *Reply) error {
-	if args.ReqType == AskForTask {
-		m.assignTask(reply)
-	} else {
-		m.finishTask(args)
-	}
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		if args.ReqType == AskForTask {
+			m.assignTask(reply)
+		} else {
+			m.finishTask(args)
+		}
+		wg.Done()
+	}()
+	wg.Wait()
 	return nil
 }
 
 // handles workers' request for a task
 func (m *Master) assignTask(reply *Reply) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.status == MapStage {
+	status := m.status
+	if status == MapStage {
 		m.assignMapTask(reply)
-		fmt.Println("assigned 1 map task")
-	} else if m.status == ReduceStage {
+	} else if status == ReduceStage {
 		m.assignReduceTask(reply)
-		fmt.Println("assigned 1 reduce task")
 	} else {
 		reply.Status = AllTaskDone
 	}
@@ -81,10 +85,12 @@ func (m *Master) assignMapTask(reply *Reply) {
 		reply.Status = TaskAvailable
 		reply.TaskId = index
 		reply.TaskType = MapTask
+		reply.ReduceTasks = m.reduceTasks
 		reply.Filename = m.mapTasks[index]
 		m.mapInProgress[index] = setValue
 		m.mapNotAssigned.Remove(element)
-		m.checkTask(MapTask, index)
+		log.Println("assigned 1 reduce task, task id: " + strconv.Itoa(reply.TaskId))
+		go m.checkTask(MapTask, index)
 	} else {
 		reply.Status = NoTaskAvailable
 	}
@@ -100,9 +106,11 @@ func (m *Master) assignReduceTask(reply *Reply) {
 		reply.Status = TaskAvailable
 		reply.TaskType = ReduceTask
 		reply.TaskId = index
+		reply.MapTasks = len(m.mapTasks)
 		m.reduceInProgress[index] = setValue
 		m.reduceNotAssigned.Remove(element)
-		m.checkTask(ReduceTask, index)
+		log.Println("assigned 1 map task")
+		go m.checkTask(ReduceTask, index)
 	} else {
 		reply.Status = NoTaskAvailable
 	}
@@ -113,33 +121,20 @@ func (m *Master) finishTask(args *Args) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.status == MapStage {
-		m.finishMapTask(args)
+		delete(m.mapInProgress, args.TaskId)
+		m.mapFinished++
+		if m.mapFinished == len(m.mapTasks) {
+			m.status = ReduceStage
+		}
 		fmt.Println("finished 1 map task")
 	} else if m.status == ReduceStage {
-		m.finishReduceTask(args)
+		delete(m.reduceInProgress, args.TaskId)
+		m.reduceFinished++
+		if m.reduceFinished == m.reduceTasks {
+			m.status = FinishedStage
+		}
+		m.deleteIntermediates(args.TaskId)
 		fmt.Println("finished 1 reduce task")
-	}
-}
-
-// finish a map task
-func (m *Master) finishMapTask(args *Args) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.mapInProgress, args.TaskId)
-	m.mapFinished++
-	if m.mapFinished == len(m.mapTasks) {
-		m.status = ReduceStage
-	}
-}
-
-// finish a reduce task
-func (m *Master) finishReduceTask(args *Args) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.reduceInProgress, args.TaskId)
-	m.reduceFinished++
-	if m.reduceFinished == m.reduceTasks {
-		m.status = FinishedStage
 	}
 }
 
@@ -188,18 +183,19 @@ func (m *Master) Done() bool {
 // check if a task is successfully finished in 10 seconds
 // this would be call every time when a task is assigned to a worker
 //
-
 func (m *Master) checkTask(taskType int, taskId int) {
 	time.Sleep(time.Second * 10)
 	if taskType == MapTask {
 		_, exists := m.mapInProgress[taskId]
 		if exists {
 			m.mapNotAssigned.PushBack(taskId)
+			log.Println("1 map task failed")
 		}
 	} else if taskType == ReduceTask {
 		_, exists := m.reduceInProgress[taskId]
 		if exists {
 			m.reduceNotAssigned.PushBack(taskId)
+			log.Println("1 reduce task failed")
 		}
 	}
 }
@@ -218,7 +214,23 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m.status = MapStage
 	m.reduceFinished = 0
 	m.mapFinished = 0
+	m.mapInProgress = make(map[int]void)
+	m.reduceInProgress = make(map[int]void)
+	for i := 0; i < len(files); i++ {
+		m.mapNotAssigned.PushBack(i)
+	}
+	for i := 0; i < nReduce; i++ {
+		m.reduceNotAssigned.PushBack(i)
+	}
 
 	m.server()
 	return &m
+}
+
+// deletes intermediate files
+func (m *Master) deleteIntermediates(reduceId int) {
+	for i := 0; i < len(m.mapTasks); i++ {
+		filename := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reduceId)
+		_ = os.Remove(filename)
+	}
 }

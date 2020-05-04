@@ -9,7 +9,9 @@ import (
 	"strconv"
 )
 
-func doMap(filename string, taskId int, reduceTasks int, mapf func(string, string) []KeyValue) bool {
+// do map and save intermediate key values to json files
+func DoMap(filename string, taskId int, reduceTasks int, mapf func(string, string) []KeyValue) bool {
+	log.Println(filename)
 	content := readFile(filename)
 	kva := mapf(filename, content)
 	sort.Sort(ByKey(kva))
@@ -35,10 +37,10 @@ func doMap(filename string, taskId int, reduceTasks int, mapf func(string, strin
 	}
 
 	result := toJson(taskId, intermediateMap)
-
 	return result
 }
 
+// read input file
 func readFile(filename string) string {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -52,13 +54,15 @@ func readFile(filename string) string {
 	return string(content)
 }
 
+// save intermediate key and values to json files
 func toJson(taskId int, intermediateMap map[int][][]KeyValue) bool {
 	for key := range intermediateMap {
 		filename := "mr-" + strconv.Itoa(taskId) + "-" + strconv.Itoa(key)
 
-		file, err := ioutil.TempFile("", "tmp-*")
-		if err != nil {
-			log.Println("Error creating temp file.")
+
+		file, res := createTmpFile("map")
+
+		if !res {
 			return false
 		}
 
@@ -67,21 +71,18 @@ func toJson(taskId int, intermediateMap map[int][][]KeyValue) bool {
 			for _, keyValue := range keyValues {
 				err := enc.Encode(keyValue)
 				if err != nil {
-					log.Println("Cannot decode key value: " + keyValue.Key + keyValue.Value + " to Json")
+					log.Println("Cannot encode key value: " + keyValue.Key + keyValue.Value + " to Json")
 				}
 			}
 		}
 
-		_, err = os.Stat(filename)
-
-		if err == nil || !os.IsNotExist(err) {
-			return false
+		if fileExists(filename) {
+			continue
 		}
 
-		err = os.Rename(file.Name(), filename)
-		if err != nil {
-			_ = os.Remove(file.Name())
-			log.Println("Failed to rename file")
+		res = renameFile(file.Name(), filename)
+
+		if !res {
 			return false
 		}
 
