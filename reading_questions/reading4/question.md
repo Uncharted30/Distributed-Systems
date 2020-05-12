@@ -1,0 +1,3 @@
+## How does VM FT handle network partitions? That is, is it possible that if the primary and the backup end up in different network partitions that the backup will become a primary too and the system will run with two primaries?
+
+No, VM FT has a mechanism that prevent split-brain situation from happening. The external disk server is a tie-breaker. The external disk server only allows one VM to have access to the data on the disk server. If the backup stop receiving packets from primary, and the backup want to go live it would first attempt a test-and-set supported by the disk server, the backup would go live only if the test-and-set responsed true.
