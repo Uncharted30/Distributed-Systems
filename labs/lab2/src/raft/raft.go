@@ -63,8 +63,8 @@ const (
 
 // timeouts
 const (
-	minTimeout = 500
-	maxTimeout = 650
+	minTimeout = 350
+	maxTimeout = 500
 	heartbeat  = 100
 )
 
@@ -214,6 +214,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			lastLog := rf.log[len(rf.log)-1]
 			if lastLog.Term == args.LastLogTerm {
 				if lastLog.Index <= args.LastLogIndex {
+					DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
 					reply.VoteGranted = true
 					rf.votedFor = args.CandidateId
 					rf.timer.Reset(rf.getRandomTimeout())
@@ -224,6 +225,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 					return
 				}
 			} else if lastLog.Term < args.LastLogTerm {
+				DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
 				rf.timer.Reset(rf.getRandomTimeout())
@@ -244,14 +246,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.timer.Reset(rf.getRandomTimeout())
-	DPrintf("[%d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d", rf.me, args.LeaderId,rf.commitIndex, rf.lastApplied, rf.currentTerm)
+
+	//DPrintf("[%d - %d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d", rf.me, rf.state, args.LeaderId, rf.commitIndex, rf.lastApplied, rf.currentTerm)
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
+
+	rf.timer.Reset(rf.getRandomTimeout())
 
 	if args.Term > rf.currentTerm {
 		rf.state = follower
@@ -272,7 +276,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 
-	DPrintf("[%d]appending new log entries... len: %d", rf.me, len(args.Entries))
 	logLen := len(rf.log)
 	for _, log := range args.Entries {
 		if log.Index < logLen {
@@ -377,6 +380,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // send an appendEntries RPC to a server.
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//DPrintf("[%d] sending AppendEntries to %d", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if ok {
 		rf.mu.Lock()
@@ -385,19 +389,17 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			return
 		}
 
+		//DPrintf("[%d]get AppendEntry reply from %d", rf.me, server)
+
 		if reply.Success {
-			//DPrintf("old matchIndex: %d, old nextIndex: %d", rf.matchIndex[server], rf.nextIndex[server])
 			if len(args.Entries) > 0 {
-				DPrintf("[%d]get AppendEntry reply from %d", rf.me, server)
 				rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 				rf.nextIndex[server] = rf.matchIndex[server] + 1
 				rf.cond.Broadcast()
 			}
-			//DPrintf("new matchIndex: %d, new nextIndex: %d", rf.matchIndex[server], rf.nextIndex[server])
 		} else {
 			if reply.Term == args.Term {
 				rf.nextIndex[server]--
-				//DPrintf("new matchIndex: %d, new nextIndex: %d", rf.matchIndex[server], rf.nextIndex[server])
 				rf.mu.Unlock()
 				reply = new(AppendEntriesReply)
 				args.LeaderCommit = rf.commitIndex
@@ -407,6 +409,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				go rf.sendAppendEntries(server, args, reply)
 				return
 			} else if reply.Term > rf.currentTerm {
+				DPrintf("stepping down...")
 				rf.currentTerm = reply.Term
 				rf.state = follower
 				rf.votedFor = -1
@@ -431,7 +434,6 @@ func (rf *Raft) applier() {
 			for i := lastLog.Index; i > rf.commitIndex ; i-- {
 				count := 1
 				for j := range rf.matchIndex {
-					DPrintf("%d %d", j, rf.matchIndex[j])
 					if rf.matchIndex[j] >= i {
 						count++
 					}
@@ -439,13 +441,13 @@ func (rf *Raft) applier() {
 
 				if count > len(rf.peers)/2 {
 					rf.commitIndex = i
-					DPrintf("new commit index: %d", rf.commitIndex)
+					//DPrintf("[%d]new commit index: %d",rf.me, rf.commitIndex)
 					break
 				}
 			}
 		}
 
-		DPrintf("updating commit index...")
+		//DPrintf("[%d]updating commit index...", rf.me)
 
 		for rf.lastApplied < rf.commitIndex {
 			log := rf.log[rf.lastApplied+1]
@@ -540,12 +542,12 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 		}
 		go func(server int) {
 			reply := new(RequestVoteReply)
-			DPrintf("[%d] is sending vote request to [%d]", rf.me, server)
+			//DPrintf("[%d] is sending vote request to [%d]", rf.me, server)
 			ok := rf.sendRequestVote(server, args, reply)
 			if ok {
 				lock.Lock()
 				defer lock.Unlock()
-				DPrintf("[%d] get result from %d", rf.me, server)
+				//DPrintf("[%d] get result from %d", rf.me, server)
 				finished++
 				if reply.VoteGranted {
 					vote++
@@ -557,11 +559,14 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 	}
 
 	lock.Lock()
-	for vote <= len(rf.peers)/2 && finished < 10 {
+	for vote <= len(rf.peers)/2 && finished < len(rf.peers) {
 		cond.Wait()
+		DPrintf("[%d] votes get: %d", rf.me, vote)
 		rf.mu.Lock()
-		if rf.state != follower || args.Term != rf.currentTerm {
+		if rf.state != candidate || args.Term != rf.currentTerm {
+			DPrintf("[%d] exit election because of term change", rf.me)
 			rf.mu.Unlock()
+			lock.Unlock()
 			break
 		}
 		rf.mu.Unlock()
