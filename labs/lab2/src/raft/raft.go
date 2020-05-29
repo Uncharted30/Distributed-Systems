@@ -294,8 +294,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.XTerm = -1
 		} else {
 			reply.XTerm = rf.log[args.PrevLogIndex].Term
-			reply.XIndex = rf.log[args.PrevLogIndex].Index
-		}
+			i := rf.log[args.PrevLogIndex].Index - 1
+			for ; i > 0; i-- {
+				if rf.log[i].Term != reply.XTerm {
+					break
+				}
+			}
+			reply.XIndex = i + 1
+ 		}
 		return
 	}
 
@@ -305,7 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for _, l := range args.Entries {
 		if l.Index < logLen {
 			if rf.log[l.Index].Term != l.Term {
-				rf.log = rf.log[0:l.Index + 1]
+				rf.log = rf.log[0:l.Index]
 				logLen = len(rf.log)
 			} else {
 				continue
@@ -411,7 +417,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // send an appendEntries RPC to a server.
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	DPrintf("[%d] sending AppendEntries to %d, commit index is %d, log len: %d", rf.me, server, rf.commitIndex, len(rf.log))
+	DPrintf("[%d] sending AppendEntries to %d, commit index is %d, log len: %d, term: %d", rf.me, server, rf.commitIndex, len(rf.log), rf.currentTerm)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if ok {
 		rf.mu.Lock()
@@ -435,7 +441,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				} else {
 					hasTerm := false
 					i := len(rf.log) - 1
-					for ; i >= 0; i-- {
+					for ; i > 0; i-- {
 						if rf.log[i].Term == reply.XTerm {
 							hasTerm = true
 							break
@@ -459,7 +465,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				go rf.sendAppendEntries(server, args, reply)
 				return
 			} else if reply.Term > rf.currentTerm {
-				DPrintf("stepping down...")
+				DPrintf("[%d] stepping down...", rf.me)
 				rf.currentTerm = reply.Term
 				rf.state = follower
 				rf.votedFor = -1
