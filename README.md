@@ -4,10 +4,10 @@ MIT 6.824 Distributed System course materials, labs, assignments.
 ## Progress
 
 - [x] Lab 1: MapReduce
-- [ ] Lab 2: Raft
-    - [ ] Lab 2A
-    - [ ] Lab 2B
-    - [ ] Lab 2C
+- [X] Lab 2: Raft
+    - [X] Lab 2A
+    - [X] Lab 2B
+    - [X] Lab 2C
 - [ ] Lab 3: KV Raft
     - [ ] Lab 3A
     - [ ] Lab 3B
@@ -46,3 +46,7 @@ The master keeps tracks unassigned tasks and tasks in progress, if a worker hasn
 The master can't reliably distinguish between crashed workers, workers that are alive but have stalled for some reason, and workers that are executing but too slowly to be useful. For this lab, the master will wait for ten seconds; after that the master should assume the worker has died (of course, it might not have).
 
 To ensure that nobody observes partially written files in the presence of crashes, the MapReduce paper mentions the trick of using a temporary file and atomically renaming it once it is completely written. For this lab, I use ioutil.TempFile in Go to create a temporary file and os.Rename in Go to atomically rename it after a task is finished.
+
+### Lab 2: Raft
+
+#### Finished lab 2, will finish this specification later...
