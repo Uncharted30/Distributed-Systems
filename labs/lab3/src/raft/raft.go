@@ -45,6 +45,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm int
 }
 
 // A Go object implementing a log entry
@@ -197,8 +198,10 @@ func (rf *Raft) applier() {
 				CommandValid: true,
 				Command:      l.Command,
 				CommandIndex: l.Index,
+				CommandTerm: l.Term,
 			}
 			rf.lastApplied++
+			DPrintf("[raft] applying log... ")
 			rf.applyCh <- applyMsg
 		}
 	}
@@ -245,8 +248,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.log = append(rf.log, newLog)
 	go rf.persist()
-
-	// Your code here (2B).
 
 	return index, term, isLeader
 }

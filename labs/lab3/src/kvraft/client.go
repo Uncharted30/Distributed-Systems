@@ -4,7 +4,6 @@ import "../labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
@@ -37,9 +36,24 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	args := GetArgs{Key: key}
+	reply := GetReply{}
 
-	// You will have to modify this function.
-	return ""
+	for {
+		for i, server := range ck.servers {
+			DPrintf("Sending get request to %d", i)
+			ok := server.Call("KVServer.Get", &args, &reply)
+			if ok {
+				if reply.Err == OK {
+					DPrintf("Get result is %s", reply.Value)
+					return reply.Value
+				} else if reply.Err == ErrNoKey {
+					return ""
+				}
+			}
+			reply = GetReply{}
+		}
+	}
 }
 
 //
@@ -53,7 +67,25 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+	}
+	reply := PutAppendReply{}
+
+	for {
+		for i, server := range ck.servers {
+			DPrintf("Sending PutAppend request to %d", i)
+			ok := server.Call("KVServer.PutAppend", &args, &reply)
+			if ok {
+				if reply.Err == OK {
+					return
+				}
+			}
+			reply = PutAppendReply{}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

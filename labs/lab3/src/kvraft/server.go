@@ -3,26 +3,21 @@ package kvraft
 import (
 	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
 	"sync"
 	"sync/atomic"
 )
 
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
+const (
+	GET    = 1
+	PUT    = 2
+	APPEND = 3
+)
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	OpType int
+	Key    string
+	Value  string
 }
 
 type KVServer struct {
@@ -35,15 +30,116 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	applied map[int]raft.ApplyMsg
+	cond *sync.Cond
+	db map[string]string
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	_, isLeader := kv.rf.GetState()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	op := Op{
+		OpType: GET,
+		Key:    args.Key,
+	}
+
+	index, term, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	for !kv.killed() {
+		kv.cond.Wait()
+		msg, ok := kv.applied[index]
+		if ok {
+			if msg.CommandTerm == term {
+				op = msg.Command.(Op)
+				v, ok := kv.db[op.Key]
+				if !ok {
+					reply.Err = ErrNoKey
+				} else {
+					reply.Err = OK
+					reply.Value = v
+				}
+			} else {
+				reply.Err = ErrWrongLeader
+			}
+			break
+		}
+	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		DPrintf("[%d] Err: not leader!", kv.me)
+		return
+	}
+
+	op := Op{
+		Key:    args.Key,
+		Value:  args.Value,
+	}
+
+	if args.Op == "Put" {
+		op.OpType = PUT
+	} else {
+		op.OpType = APPEND
+	}
+
+	index, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		DPrintf("[%d] Err: not leader!", kv.me)
+		return
+	}
+
+	for !kv.killed() {
+		kv.mu.Lock()
+		DPrintf("Start waiting for response...")
+		kv.cond.Wait()
+		msg, ok := kv.applied[index]
+		if ok {
+			if msg.CommandTerm == term {
+				op = msg.Command.(Op)
+				value, ok := kv.db[op.Key]
+				if op.OpType == PUT || !ok {
+					kv.db[op.Key] = op.Value
+				} else {
+					kv.db[op.Key] = value + op.Value
+				}
+				reply.Err = OK
+			} else {
+				reply.Err = ErrWrongLeader
+			}
+			kv.mu.Unlock()
+			break
+		}
+		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) chanListener() {
+	for msg := range kv.applyCh {
+		DPrintf("[%d] Get msg from applyCh for op index %d", kv.me, msg.CommandIndex)
+		kv.mu.Lock()
+
+		kv.applied[msg.CommandIndex] = msg
+		kv.cond.Broadcast()
+		kv.mu.Unlock()
+	}
 }
 
 //
@@ -95,7 +191,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
+	kv.cond = sync.NewCond(&kv.mu)
+	kv.db = make(map[string]string)
+	kv.applied = make(map[int]raft.ApplyMsg)
+	go kv.chanListener()
 
 	return kv
 }
