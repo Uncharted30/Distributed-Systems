@@ -18,7 +18,13 @@ type Op struct {
 	OpType int
 	Key    string
 	Value  string
+	OpId string
+	ReplyReceived []string
 }
+
+// used to describe a set using map
+type EmptyStruct struct {}
+var void EmptyStruct
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -33,6 +39,7 @@ type KVServer struct {
 	applied map[int]raft.ApplyMsg
 	cond *sync.Cond
 	db map[string]string
+	putAppendFinished map[string]EmptyStruct
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -55,6 +62,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+
+	DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
 
 	kv.mu.Lock()
 	for !kv.killed() {
@@ -81,16 +90,23 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	_, finished := kv.putAppendFinished[args.OpId]
+	if finished {
+		reply.Err = OK
+		return
+	}
+
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		DPrintf("[%d] Err: not leader!", kv.me)
 		return
 	}
 
 	op := Op{
 		Key:    args.Key,
 		Value:  args.Value,
+		ReplyReceived: args.ReplyReceived,
+		OpId: args.OpId,
 	}
 
 	if args.Op == "Put" {
@@ -102,43 +118,67 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		DPrintf("[%d] Err: not leader!", kv.me)
 		return
 	}
 
+	kv.mu.Lock()
 	for !kv.killed() {
-		kv.mu.Lock()
-		DPrintf("Start waiting for response...")
+		DPrintf("[%d] Start waiting for PUT/APPEND response of op index %d...", kv.me, index)
 		kv.cond.Wait()
 		msg, ok := kv.applied[index]
 		if ok {
 			if msg.CommandTerm == term {
-				op = msg.Command.(Op)
-				value, ok := kv.db[op.Key]
-				if op.OpType == PUT || !ok {
-					kv.db[op.Key] = op.Value
-				} else {
-					kv.db[op.Key] = value + op.Value
-				}
 				reply.Err = OK
 			} else {
 				reply.Err = ErrWrongLeader
 			}
-			kv.mu.Unlock()
 			break
 		}
-		kv.mu.Unlock()
 	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) chanListener() {
 	for msg := range kv.applyCh {
 		DPrintf("[%d] Get msg from applyCh for op index %d", kv.me, msg.CommandIndex)
 		kv.mu.Lock()
+		DPrintf("[%d] Get Lock", kv.me)
+
+		if msg.Command != nil {
+			op := msg.Command.(Op)
+			_, finished := kv.putAppendFinished[op.OpId]
+
+			if !finished {
+				if op.OpType == PUT {
+					kv.db[op.Key] = op.Value
+					kv.putAppendFinished[op.OpId] = void
+				} else if op.OpType == APPEND {
+					value, ok := kv.db[op.Key]
+					if ok {
+						kv.db[op.Key] = value + op.Value
+					} else {
+						kv.db[op.Key] = op.Value
+					}
+					kv.putAppendFinished[op.OpId] = void
+				}
+
+				if op.ReplyReceived != nil {
+					go kv.removeReceived(op.ReplyReceived)
+				}
+			}
+		}
 
 		kv.applied[msg.CommandIndex] = msg
 		kv.cond.Broadcast()
 		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) removeReceived(opIds []string) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	for _, opId := range opIds {
+		delete(kv.putAppendFinished, opId)
 	}
 }
 
@@ -194,6 +234,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.cond = sync.NewCond(&kv.mu)
 	kv.db = make(map[string]string)
 	kv.applied = make(map[int]raft.ApplyMsg)
+	kv.putAppendFinished = make(map[string]EmptyStruct)
 	go kv.chanListener()
 
 	return kv

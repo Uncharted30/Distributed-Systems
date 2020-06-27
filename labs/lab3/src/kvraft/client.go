@@ -1,12 +1,25 @@
 package kvraft
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"strconv"
+	"sync"
+	"time"
+)
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	lastLeader int
+
+	// client id
+	// in production, this could be replace by some other unique identification
+	// such as MAC address of a computer
+	cid int64
+	replyReceived []string
+	mu sync.Mutex
 }
 
 func nrand() int64 {
@@ -20,6 +33,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.lastLeader = 0
+	ck.cid = nrand()
+	DPrintf("Cid is %d", ck.cid)
 	return ck
 }
 
@@ -39,13 +55,26 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{Key: key}
 	reply := GetReply{}
 
+	DPrintf("Get request, key is %s", key)
+
+	ok := ck.servers[ck.lastLeader].Call("KVServer.Get", &args, &reply)
+
+	if ok {
+		if reply.Err == OK {
+			return reply.Value
+		} else if reply.Err == ErrNoKey {
+			return ""
+		}
+	}
+
+	reply = GetReply{}
 	for {
 		for i, server := range ck.servers {
-			DPrintf("Sending get request to %d", i)
 			ok := server.Call("KVServer.Get", &args, &reply)
 			if ok {
 				if reply.Err == OK {
 					DPrintf("Get result is %s", reply.Value)
+					ck.lastLeader = i
 					return reply.Value
 				} else if reply.Err == ErrNoKey {
 					return ""
@@ -67,19 +96,42 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+
+	DPrintf("Put append request, key is %s, value is %s", key, value)
+
+	ck.mu.Lock()
+	opId := strconv.FormatInt(ck.cid, 10) + strconv.FormatInt(time.Now().UnixNano(), 10)
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
-		Op:    op,
+		Key:           key,
+		Value:         value,
+		Op:            op,
+		OpId:          opId,
+		ReplyReceived: ck.replyReceived,
 	}
+	ck.replyReceived = make([]string, 0)
+	ck.mu.Unlock()
 	reply := PutAppendReply{}
 
+	ok := ck.servers[ck.lastLeader].Call("KVServer.PutAppend", &args, &reply)
+
+	if ok {
+		if reply.Err == OK {
+			return
+		}
+	}
+
+	DPrintf("Failed... Probing leader!!!")
+
+	reply = PutAppendReply{}
 	for {
 		for i, server := range ck.servers {
-			DPrintf("Sending PutAppend request to %d", i)
 			ok := server.Call("KVServer.PutAppend", &args, &reply)
 			if ok {
 				if reply.Err == OK {
+					ck.lastLeader = i
+					ck.mu.Lock()
+					ck.replyReceived = append(ck.replyReceived, args.OpId)
+					ck.mu.Unlock()
 					return
 				}
 			}
