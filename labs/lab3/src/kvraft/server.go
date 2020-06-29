@@ -90,7 +90,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
 	_, finished := kv.putAppendFinished[args.OpId]
+	kv.mu.Unlock()
 	if finished {
 		reply.Err = OK
 		return
