@@ -46,7 +46,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// first check term of the candidate
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
-		DPrintf("[%d] rejected vote request from %d, because current term is larger.", rf.me, args.CandidateId)
+		//DPrintf("[%d] rejected vote request from %d, because current term is larger.", rf.me, args.CandidateId)
 		return
 	} else {
 		//check if the server has granted vote for this term
@@ -55,7 +55,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			lastLog := rf.log[len(rf.log)-1]
 			if lastLog.Term == args.LastLogTerm {
 				if lastLog.Index <= args.LastLogIndex {
-					DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
+					//DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
 					reply.VoteGranted = true
 					rf.votedFor = args.CandidateId
 					rf.timer.Reset(rf.getRandomTimeout())
@@ -63,11 +63,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 					return
 				} else {
 					reply.VoteGranted = false
-					DPrintf("[%d] rejected vote request from %d, because log is more up-to-date.", rf.me, args.CandidateId)
+					//DPrintf("[%d] rejected vote request from %d, because log is more up-to-date.", rf.me, args.CandidateId)
 					return
 				}
 			} else if lastLog.Term < args.LastLogTerm {
-				DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
+				//DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
 				rf.timer.Reset(rf.getRandomTimeout())
@@ -79,7 +79,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 		} else { // this server has granted vote to another candidate
 			reply.VoteGranted = false
-			DPrintf("[%d] rejected vote request from %d, because already voted.", rf.me, args.CandidateId)
+			//DPrintf("[%d] rejected vote request from %d, because already voted.", rf.me, args.CandidateId)
 			return
 		}
 	}
@@ -173,7 +173,7 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 				finished++
 				if reply.VoteGranted {
 					vote++
-					DPrintf("[%d(%d)] get vote from %d, ", rf.me, rf.state, server)
+					//DPrintf("[%d(%d)] get vote from %d, ", rf.me, rf.state, server)
 				}
 				cond.Broadcast()
 			}
@@ -183,10 +183,10 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 	lock.Lock()
 	for vote <= len(rf.peers)/2 && finished < len(rf.peers) {
 		cond.Wait()
-		DPrintf("[%d] votes get: %d", rf.me, vote)
+		//DPrintf("[%d] votes get: %d", rf.me, vote)
 		rf.mu.Lock()
 		if rf.state != candidate || args.Term != rf.currentTerm {
-			DPrintf("[%d] exit election because of term change", rf.me)
+			//DPrintf("[%d] exit election because of term change", rf.me)
 			rf.mu.Unlock()
 			lock.Unlock()
 			break
@@ -198,7 +198,7 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 	if rf.state == candidate && args.Term == rf.currentTerm {
 		if vote > len(rf.peers)/2 {
 			rf.mu.Unlock()
-			DPrintf("[%d] became the leader", rf.me)
+			//DPrintf("[%d] became the leader", rf.me)
 			rf.becomeLeader()
 			return
 		}

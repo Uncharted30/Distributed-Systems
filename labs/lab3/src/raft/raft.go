@@ -45,7 +45,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-	CommandTerm int
+	CommandTerm  int
 }
 
 // A Go object implementing a log entry
@@ -53,6 +53,14 @@ type LogEntry struct {
 	Index   int
 	Term    int
 	Command interface{}
+}
+
+type DiscardLogsArgs struct {
+	index int
+}
+
+type DiscardLogsReply struct {
+	Status bool
 }
 
 // append entries
@@ -150,7 +158,7 @@ func (rf *Raft) readPersist(data []byte) {
 		decoder.Decode(&logs) != nil {
 		log.Fatalf("[%d] Failed to decode persisted states.", rf.me)
 	} else {
-		DPrintf("[%d] persisted log len: %d", rf.me, len(logs))
+		//DPrintf("[%d] persisted log len: %d", rf.me, len(logs))
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		rf.currentTerm = currentTerm
@@ -168,9 +176,12 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.cond.Wait()
 
-		lastLog := rf.log[len(rf.log)-1]
 		if rf.state == leader {
-			for i := lastLog.Index; i > rf.commitIndex; i-- {
+			for i := len(rf.log) - 1; i >= 0; i-- {
+				if rf.log[i].Index == rf.commitIndex {
+					break
+				}
+
 				if rf.log[i].Term < rf.currentTerm {
 					break
 				}
@@ -191,21 +202,32 @@ func (rf *Raft) applier() {
 		}
 
 		//DPrintf("[%d]updating commit index...", rf.me)
-
+		firstLogIndex := rf.log[0].Index
 		for rf.lastApplied < rf.commitIndex {
-			l := rf.log[rf.lastApplied+1]
+			index := rf.lastApplied + 1 - firstLogIndex
+			l := rf.log[index]
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      l.Command,
 				CommandIndex: l.Index,
-				CommandTerm: l.Term,
+				CommandTerm:  l.Term,
 			}
 			rf.lastApplied++
-			DPrintf("[raft] applying log... ")
+			//DPrintf("[raft] applying log... ")
 			rf.applyCh <- applyMsg
 		}
 	}
 	rf.mu.Unlock()
+}
+
+// Discard logs for snapshotting
+func (rf *Raft) discardLogs(index int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	firstLogIndex := rf.log[0].Index
+	discardIndex := index - firstLogIndex + 1
+	rf.log = rf.log[discardIndex :]
 }
 
 //
@@ -238,7 +260,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = lastLog.Index + 1
 	term = rf.currentTerm
 
-	DPrintf("[%d] get new command, index: %d, command: %s", rf.me, index, command)
+	//DPrintf("[%d] get new command, index: %d, command: %s", rf.me, index, command)
 
 	newLog := LogEntry{
 		Index:   index,
@@ -257,11 +279,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) timeout() {
 	for !rf.killed() {
 		<-rf.timer.C
-		if rf.state == leader {
+		rf.mu.Lock()
+		state := rf.state
+		rf.mu.Unlock()
+		if state == leader {
 			rf.sendHeartBeat()
 		} else {
 			go rf.startElection()
-			DPrintf("[%d] is starting an election...", rf.me)
+			//DPrintf("[%d] is starting an election...", rf.me)
 			//rf.timer.Reset(getRandomTimeout())
 		}
 	}
