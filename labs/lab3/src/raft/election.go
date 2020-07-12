@@ -52,9 +52,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//check if the server has granted vote for this term
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			// check if the candidate's log is up-to-date
-			lastLog := rf.log[len(rf.log)-1]
-			if lastLog.Term == args.LastLogTerm {
-				if lastLog.Index <= args.LastLogIndex {
+			lastLogIndex, lastLogTerm := rf.getLastLogInfo()
+			if lastLogTerm == args.LastLogTerm {
+				if lastLogIndex <= args.LastLogIndex {
 					//DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
 					reply.VoteGranted = true
 					rf.votedFor = args.CandidateId
@@ -66,7 +66,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 					//DPrintf("[%d] rejected vote request from %d, because log is more up-to-date.", rf.me, args.CandidateId)
 					return
 				}
-			} else if lastLog.Term < args.LastLogTerm {
+			} else if lastLogTerm < args.LastLogTerm {
 				//DPrintf("[%d] grand vote to %d", rf.me, args.CandidateId)
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
@@ -135,12 +135,12 @@ func (rf *Raft) startElection() {
 	rf.votedFor = rf.me
 	rf.state = candidate
 	rf.timer.Reset(rf.getRandomTimeout())
-	lastLog := rf.log[len(rf.log)-1]
+	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: lastLog.Index,
-		LastLogTerm:  lastLog.Term,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
 	}
 	rf.mu.Unlock()
 	go rf.persist()
@@ -198,7 +198,7 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 	if rf.state == candidate && args.Term == rf.currentTerm {
 		if vote > len(rf.peers)/2 {
 			rf.mu.Unlock()
-			//DPrintf("[%d] became the leader", rf.me)
+			DPrintf("[%d] became the leader", rf.me)
 			rf.becomeLeader()
 			return
 		}
@@ -209,11 +209,11 @@ func (rf *Raft) requestVotes(args *RequestVoteArgs) {
 // step up as a leader
 func (rf *Raft) becomeLeader() {
 	rf.mu.Lock()
-	lastLog := rf.log[len(rf.log)-1]
+	lastLogIndex, _ := rf.getLastLogInfo()
 	rf.state = leader
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := 0; i < len(rf.nextIndex); i++ {
-		rf.nextIndex[i] = lastLog.Index + 1
+		rf.nextIndex[i] = lastLogIndex+ 1
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.mu.Unlock()

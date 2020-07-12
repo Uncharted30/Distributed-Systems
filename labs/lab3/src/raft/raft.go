@@ -46,6 +46,8 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 	CommandTerm  int
+	RaftStateSize int
+	IsSnapshot bool
 }
 
 // A Go object implementing a log entry
@@ -53,14 +55,6 @@ type LogEntry struct {
 	Index   int
 	Term    int
 	Command interface{}
-}
-
-type DiscardLogsArgs struct {
-	index int
-}
-
-type DiscardLogsReply struct {
-	Status bool
 }
 
 // append entries
@@ -105,6 +99,8 @@ type Raft struct {
 	applyCh     chan ApplyMsg
 	cond        *sync.Cond
 	matchCount  map[int]int
+	lastIncludedLogIndex int
+	lastIncludedLogTerm int
 }
 
 // return currentTerm and whether this server
@@ -129,6 +125,11 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
+	data := rf.encodeRaftState()
+	rf.persister.SaveRaftState(data)
+}
+
+func (rf *Raft) encodeRaftState() []byte {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	w := new(bytes.Buffer)
@@ -136,8 +137,9 @@ func (rf *Raft) persist() {
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.votedFor)
 	encoder.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	encoder.Encode(rf.lastIncludedLogIndex)
+	encoder.Encode(rf.lastIncludedLogTerm)
+	return w.Bytes()
 }
 
 //
@@ -153,9 +155,14 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var logs []LogEntry
+	var lastIncludedLogIndex int
+	var lastIncludedLogTerm int
+
 	if decoder.Decode(&currentTerm) != nil ||
 		decoder.Decode(&votedFor) != nil ||
-		decoder.Decode(&logs) != nil {
+		decoder.Decode(&logs) != nil ||
+		decoder.Decode(&lastIncludedLogIndex) != nil ||
+		decoder.Decode(&lastIncludedLogTerm) != nil {
 		log.Fatalf("[%d] Failed to decode persisted states.", rf.me)
 	} else {
 		//DPrintf("[%d] persisted log len: %d", rf.me, len(logs))
@@ -164,6 +171,8 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = logs
+		rf.lastIncludedLogIndex = lastIncludedLogIndex
+		rf.lastIncludedLogTerm = lastIncludedLogTerm
 	}
 }
 
@@ -202,7 +211,7 @@ func (rf *Raft) applier() {
 		}
 
 		//DPrintf("[%d]updating commit index...", rf.me)
-		firstLogIndex := rf.log[0].Index
+		firstLogIndex := rf.getFirstLogIndex()
 		for rf.lastApplied < rf.commitIndex {
 			index := rf.lastApplied + 1 - firstLogIndex
 			l := rf.log[index]
@@ -211,6 +220,7 @@ func (rf *Raft) applier() {
 				Command:      l.Command,
 				CommandIndex: l.Index,
 				CommandTerm:  l.Term,
+				RaftStateSize: rf.persister.RaftStateSize(),
 			}
 			rf.lastApplied++
 			//DPrintf("[raft] applying log... ")
@@ -218,16 +228,6 @@ func (rf *Raft) applier() {
 		}
 	}
 	rf.mu.Unlock()
-}
-
-// Discard logs for snapshotting
-func (rf *Raft) discardLogs(index int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	firstLogIndex := rf.log[0].Index
-	discardIndex := index - firstLogIndex + 1
-	rf.log = rf.log[discardIndex :]
 }
 
 //
@@ -247,7 +247,7 @@ func (rf *Raft) discardLogs(index int) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	lastLog := rf.log[len(rf.log)-1]
+
 	index := -1
 	term := -1
 	isLeader := true
@@ -257,10 +257,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	index = lastLog.Index + 1
+
+	lastLogIndex, _ := rf.getLastLogInfo()
+	index = lastLogIndex + 1
 	term = rf.currentTerm
 
-	//DPrintf("[%d] get new command, index: %d, command: %s", rf.me, index, command)
+	DPrintf("[%d] get new command, index: %d, command: %s", rf.me, index, command)
 
 	newLog := LogEntry{
 		Index:   index,
@@ -290,6 +292,33 @@ func (rf *Raft) timeout() {
 			//rf.timer.Reset(getRandomTimeout())
 		}
 	}
+}
+
+// get firstLogIndex, if the length of the log is 0, return -1
+// lock is required by the caller
+func (rf *Raft) getFirstLogIndex() int {
+	if len(rf.log) == 0 {
+		return -1
+	}
+	return rf.log[0].Index
+}
+
+// get lastLogIndex, if the length of the log is 0, return lastIncludedIndex in the last snapshot
+// lock is required by the caller
+func (rf *Raft) getLastLogInfo() (int, int) {
+	if len(rf.log) == 0 {
+		return rf.lastIncludedLogIndex, rf.lastIncludedLogTerm
+	}
+	return rf.log[len(rf.log) - 1].Index, rf.log[len(rf.log) - 1].Term
+}
+
+// when sending appendEntries request to peers, use this function to get prevLogIndex and prevLogTerm
+// for AppendEntriesArgs
+func (rf *Raft) getPrevLogInfo(index int) (int, int) {
+	if index == 0 {
+		return rf.lastIncludedLogIndex, rf.lastIncludedLogTerm
+	}
+	return rf.log[index - 1].Index, rf.log[index - 1].Term
 }
 
 //

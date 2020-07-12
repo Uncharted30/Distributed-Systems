@@ -4,6 +4,8 @@ import (
 	"../labgob"
 	"../labrpc"
 	"../raft"
+	"bytes"
+	"log"
 	"sync"
 	"sync/atomic"
 )
@@ -40,6 +42,7 @@ type KVServer struct {
 	cond *sync.Cond
 	db map[string]string
 	putAppendFinished map[string]EmptyStruct
+	lastApplied int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -82,6 +85,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			} else {
 				reply.Err = ErrWrongLeader
 			}
+			delete(kv.applied, index)
 			break
 		}
 	}
@@ -134,6 +138,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			} else {
 				reply.Err = ErrWrongLeader
 			}
+			delete(kv.applied, index)
 			break
 		}
 	}
@@ -147,6 +152,16 @@ func (kv *KVServer) chanListener() {
 		DPrintf("[%d] Get Lock", kv.me)
 
 		if msg.Command != nil {
+			if msg.IsSnapshot {
+				r := bytes.NewBuffer(msg.Command.([]byte))
+				decoder := labgob.NewDecoder(r)
+				err := decoder.Decode(&kv.db)
+
+				if err != nil {
+					log.Fatalf("Failed to decode snapshot")
+				}
+			}
+
 			op := msg.Command.(Op)
 			_, finished := kv.putAppendFinished[op.OpId]
 
@@ -172,8 +187,23 @@ func (kv *KVServer) chanListener() {
 
 		kv.applied[msg.CommandIndex] = msg
 		kv.cond.Broadcast()
+		kv.lastApplied = msg.CommandIndex
+		if kv.maxraftstate != -1 && msg.RaftStateSize >= kv.maxraftstate {
+			go kv.snapshot()
+		}
 		kv.mu.Unlock()
 	}
+}
+
+func (kv *KVServer) snapshot() {
+	kv.mu.Lock()
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	encoder.Encode(kv.db)
+	encoder.Encode(kv.putAppendFinished)
+	index := kv.lastApplied
+	kv.mu.Unlock()
+	kv.rf.Snapshot(w.Bytes(), index)
 }
 
 func (kv *KVServer) removeReceived(opIds []string) {

@@ -28,7 +28,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	changed := false
 
-	//DPrintf("[%d - %d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d, entries len: %d, prevLogIndex: %d", rf.me, rf.state, args.LeaderId, rf.commitIndex, rf.lastApplied, rf.currentTerm, len(args.Entries), args.PrevLogIndex)
 
 	// checks if term of the master is at least as up-to-date as this server
 	if args.Term < rf.currentTerm {
@@ -49,19 +48,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 
-	lastLogEntry := rf.log[len(rf.log)-1]
-	firstLogIndex := rf.log[0].Index
+	lastLogIndex, _ := rf.getLastLogInfo()
+	firstLogIndex := rf.getFirstLogIndex()
 	// to locate prevLog in the args after snapshotting
 	thisPreLogIndex := args.PrevLogIndex - firstLogIndex
 	//DPrintf("%d %d, %d %d", lastLogEntry.Index, lastLogEntry.Term, args.PrevLogIndex, args.PrevLogTerm)
+	DPrintf("[%d - %d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d, entries len: %d, prevLogIndex: %d, lastLogIndex: %d", rf.me, rf.state, args.LeaderId, rf.commitIndex, rf.lastApplied, rf.currentTerm, len(args.Entries), args.PrevLogIndex, lastLogIndex)
+
 
 	// checks if this server has lastLogEntry
 	// with quick roll back
-	if lastLogEntry.Index < args.PrevLogIndex || rf.log[thisPreLogIndex].Term != args.PrevLogTerm {
+	if lastLogIndex < args.PrevLogIndex || rf.log[thisPreLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
-		reply.XLen = lastLogEntry.Index + 1
+		reply.XLen = lastLogIndex + 1
 
-		if lastLogEntry.Index < args.PrevLogIndex {
+		if lastLogIndex < args.PrevLogIndex {
 			reply.XIndex = -1
 			reply.XTerm = -1
 		} else {
@@ -81,12 +82,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// append new entries to the log in this server
 	for _, l := range args.Entries {
-		if l.Index <= lastLogEntry.Index {
+		if l.Index <= lastLogIndex {
 			// if there's term conflict, delete all entries from that entry index
 			logIndex := l.Index - firstLogIndex
 			if rf.log[logIndex].Term != l.Term {
 				rf.log = rf.log[0:logIndex]
-				lastLogEntry = rf.log[len(rf.log) - 1]
+				lastLogIndex, _ = rf.getLastLogInfo()
 			} else {
 				continue
 			}
@@ -96,10 +97,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// update commit index
-	lastLogEntry = rf.log[len(rf.log)-1]
+	lastLogIndex, _ = rf.getLastLogInfo()
 	if args.LeaderCommit > rf.commitIndex {
-		if lastLogEntry.Index < args.LeaderCommit {
-			rf.commitIndex = lastLogEntry.Index
+		if lastLogIndex < args.LeaderCommit {
+			rf.commitIndex = lastLogIndex
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
@@ -122,23 +123,32 @@ func (rf *Raft) sendHeartBeat() {
 		//DPrintf("[%d] is sending heartbeat message to %d", rf.me, i)
 		rf.mu.Lock()
 
-		lastLog := rf.log[len(rf.log)-1]
-		firstLogIndex := rf.log[0].Index
+		lastLogIndex, _ := rf.getLastLogInfo()
+		firstLogIndex := rf.getFirstLogIndex()
+
+		if firstLogIndex == -1 || rf.nextIndex[i] < firstLogIndex {
+			go rf.sendSnapshot(i)
+			rf.mu.Unlock()
+			continue
+		}
 
 		// new log entries to be sent to peers
 		var entries []LogEntry
 		nextIndex := rf.nextIndex[i] - firstLogIndex
-		if rf.nextIndex[i] <= lastLog.Index {
+
+		if rf.nextIndex[i] <= lastLogIndex {
 			entries = rf.log[nextIndex:]
 		} else {
 			entries = make([]LogEntry, 0)
 		}
 
+		DPrintf("[%d] Sending appendEntries to %d, lastLogIndex: %d, nextIndex: %d", rf.me, i, lastLogIndex, nextIndex)
+		prevLogIndex, prevLogTerm := rf.getPrevLogInfo(nextIndex)
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
-			PrevLogIndex: nextIndex - 1,
-			PrevLogTerm:  rf.log[nextIndex - 1].Term,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
 			Entries:      entries,
 			LeaderCommit: rf.commitIndex,
 		}
@@ -195,10 +205,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				}
 
 				nextLogIndex := rf.nextIndex[server] - rf.log[0].Index
+				prevLogIndex, prevLogTerm := rf.getPrevLogInfo(nextLogIndex)
 				reply = new(AppendEntriesReply)
 				args.LeaderCommit = rf.commitIndex
-				args.PrevLogTerm = rf.log[nextLogIndex - 1].Term
-				args.PrevLogIndex = nextLogIndex - 1
+				args.PrevLogTerm = prevLogTerm
+				args.PrevLogIndex = prevLogIndex
 				args.Entries = rf.log[nextLogIndex:]
 				rf.mu.Unlock()
 				go rf.sendAppendEntries(server, args, reply)
