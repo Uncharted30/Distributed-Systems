@@ -46,7 +46,6 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 	CommandTerm  int
-	RaftStateSize int
 	IsSnapshot bool
 }
 
@@ -125,13 +124,13 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	data := rf.encodeRaftState()
 	rf.persister.SaveRaftState(data)
 }
 
 func (rf *Raft) encodeRaftState() []byte {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
 	encoder.Encode(rf.currentTerm)
@@ -186,7 +185,9 @@ func (rf *Raft) applier() {
 		rf.cond.Wait()
 
 		if rf.state == leader {
+			DPrintf("match index of 1 is: %d", rf.matchIndex[1])
 			for i := len(rf.log) - 1; i >= 0; i-- {
+				DPrintf("%d %d", rf.log[i].Index, rf.commitIndex)
 				if rf.log[i].Index == rf.commitIndex {
 					break
 				}
@@ -197,13 +198,13 @@ func (rf *Raft) applier() {
 
 				count := 1
 				for j := range rf.matchIndex {
-					if rf.matchIndex[j] >= i {
+					if rf.matchIndex[j] >= rf.log[i].Index {
 						count++
 					}
 				}
 
 				if count > len(rf.peers)/2 {
-					rf.commitIndex = i
+					rf.commitIndex = rf.log[i].Index
 					//DPrintf("[%d]new commit index: %d",rf.me, rf.commitIndex)
 					break
 				}
@@ -220,7 +221,6 @@ func (rf *Raft) applier() {
 				Command:      l.Command,
 				CommandIndex: l.Index,
 				CommandTerm:  l.Term,
-				RaftStateSize: rf.persister.RaftStateSize(),
 			}
 			rf.lastApplied++
 			//DPrintf("[raft] applying log... ")
@@ -319,6 +319,11 @@ func (rf *Raft) getPrevLogInfo(index int) (int, int) {
 		return rf.lastIncludedLogIndex, rf.lastIncludedLogTerm
 	}
 	return rf.log[index - 1].Index, rf.log[index - 1].Term
+}
+
+// for kv server to monitor raft state size
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
 }
 
 //

@@ -86,6 +86,7 @@ func (cfg *config) LogSize() int {
 		if n > logsize {
 			logsize = n
 		}
+		fmt.Printf("[%d] state size is: %d", i, n)
 	}
 	return logsize
 }

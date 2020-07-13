@@ -100,6 +100,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	DPrintf("Put append request, key is %s, value is %s", key, value)
 
 	ck.mu.Lock()
+	DPrintf("reply received len: %d", len(ck.replyReceived))
 	opId := strconv.FormatInt(ck.cid, 10) + strconv.FormatInt(time.Now().UnixNano(), 10)
 	args := PutAppendArgs{
 		Key:           key,
@@ -108,6 +109,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		OpId:          opId,
 		ReplyReceived: ck.replyReceived,
 	}
+
 	ck.replyReceived = make([]string, 0)
 	ck.mu.Unlock()
 	reply := PutAppendReply{}
@@ -116,6 +118,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	if ok {
 		if reply.Err == OK {
+			ck.mu.Lock()
+			ck.replyReceived = append(ck.replyReceived, args.OpId)
+			ck.mu.Unlock()
 			return
 		}
 	}

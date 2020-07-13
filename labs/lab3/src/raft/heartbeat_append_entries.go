@@ -51,31 +51,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastLogIndex, _ := rf.getLastLogInfo()
 	firstLogIndex := rf.getFirstLogIndex()
 	// to locate prevLog in the args after snapshotting
-	thisPreLogIndex := args.PrevLogIndex - firstLogIndex
+	thisPrevLogIndex := args.PrevLogIndex - firstLogIndex
 	//DPrintf("%d %d, %d %d", lastLogEntry.Index, lastLogEntry.Term, args.PrevLogIndex, args.PrevLogTerm)
 	DPrintf("[%d - %d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d, entries len: %d, prevLogIndex: %d, lastLogIndex: %d", rf.me, rf.state, args.LeaderId, rf.commitIndex, rf.lastApplied, rf.currentTerm, len(args.Entries), args.PrevLogIndex, lastLogIndex)
 
 
 	// checks if this server has lastLogEntry
 	// with quick roll back
-	if lastLogIndex < args.PrevLogIndex || rf.log[thisPreLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
-		reply.XLen = lastLogIndex + 1
+	if firstLogIndex != -1 || lastLogIndex != args.PrevLogIndex {
+		if firstLogIndex == -1 || lastLogIndex < args.PrevLogIndex || rf.log[thisPrevLogIndex].Term != args.PrevLogTerm {
+			reply.Success = false
+			reply.XLen = lastLogIndex + 1
 
-		if lastLogIndex < args.PrevLogIndex {
-			reply.XIndex = -1
-			reply.XTerm = -1
-		} else {
-			reply.XTerm = rf.log[thisPreLogIndex].Term
-			i := rf.log[thisPreLogIndex].Index - 1
-			for ; i > 0; i-- {
-				if rf.log[i].Term != reply.XTerm {
-					break
+			if lastLogIndex < args.PrevLogIndex || firstLogIndex == -1 {
+				reply.XIndex = -1
+				reply.XTerm = -1
+			} else {
+				reply.XTerm = rf.log[thisPrevLogIndex].Term
+				i := rf.log[thisPrevLogIndex].Index - 1
+				for ; i > 0; i-- {
+					if rf.log[i].Term != reply.XTerm {
+						break
+					}
 				}
+				reply.XIndex = i + 1
 			}
-			reply.XIndex = i + 1
+			return
 		}
-		return
 	}
 
 	reply.Success = true
@@ -127,6 +129,7 @@ func (rf *Raft) sendHeartBeat() {
 		firstLogIndex := rf.getFirstLogIndex()
 
 		if firstLogIndex == -1 || rf.nextIndex[i] < firstLogIndex {
+			DPrintf("[%d] nextIndex: %d, firstLogIndex: %d", rf.me, rf.nextIndex, firstLogIndex)
 			go rf.sendSnapshot(i)
 			rf.mu.Unlock()
 			continue
@@ -142,7 +145,7 @@ func (rf *Raft) sendHeartBeat() {
 			entries = make([]LogEntry, 0)
 		}
 
-		DPrintf("[%d] Sending appendEntries to %d, lastLogIndex: %d, nextIndex: %d", rf.me, i, lastLogIndex, nextIndex)
+		DPrintf("[%d] Sending appendEntries to %d, lastLogIndex: %d, nextIndex: %d", rf.me, i, lastLogIndex, rf.nextIndex[i])
 		prevLogIndex, prevLogTerm := rf.getPrevLogInfo(nextIndex)
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -172,7 +175,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			return
 		}
 
-		//DPrintf("[%d]get AppendEntry reply from %d", rf.me, server)
+		DPrintf("[%d]get AppendEntry reply from %d, result: %s", rf.me, server, reply.Success)
 
 		if reply.Success {
 			if len(args.Entries) > 0 {
@@ -204,7 +207,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 					}
 				}
 
-				nextLogIndex := rf.nextIndex[server] - rf.log[0].Index
+				firstLogIndex := rf.getFirstLogIndex()
+
+				if firstLogIndex == -1 || rf.nextIndex[server] < firstLogIndex {
+					DPrintf("[%d] nextIndex: %d, firstLogIndex: %d", rf.me, rf.nextIndex, firstLogIndex)
+					go rf.sendSnapshot(server)
+					rf.mu.Unlock()
+					return
+				}
+
+				nextLogIndex := rf.nextIndex[server] - firstLogIndex
 				prevLogIndex, prevLogTerm := rf.getPrevLogInfo(nextLogIndex)
 				reply = new(AppendEntriesReply)
 				args.LeaderCommit = rf.commitIndex
