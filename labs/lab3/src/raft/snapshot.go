@@ -22,6 +22,9 @@ type InstallSnapshotReply struct {
 func (rf *Raft) Snapshot(snapshot []byte, index int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.lastIncludedLogIndex >= index {
+		return
+	}
 	DPrintf("[%d] logs: %s", rf.me, rf.log)
 	firstLogIndex := rf.getFirstLogIndex()
 
@@ -60,29 +63,36 @@ func (rf *Raft) Snapshot(snapshot []byte, index int) {
 
 // InstallSnapshot RPC
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	DPrintf("[%d] Installing snapshot", rf.me)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	reply.Term = rf.currentTerm
 
-	// wrong term
+	// wrong term or last snapshot in the raft server is newer
 	if reply.Term > args.Term || rf.lastIncludedLogIndex >= args.LastIncludedIndex {
 		reply.Status = false
 		return
 	}
 
+	// update snapshot info
 	rf.lastIncludedLogIndex = args.LastIncludedIndex
 	rf.lastIncludedLogTerm = args.LastIncludedTerm
 	firstLogIndex := rf.getFirstLogIndex()
 	reply.Status = true
-
+	DPrintf("[%d] Installing snapshot, firstLogIndex: %d, logLen: %d", rf.me, firstLogIndex, len(rf.log))
 	lastIncludedLogIndexInArr := args.LastIncludedIndex - firstLogIndex
-	if firstLogIndex == -1 || lastIncludedLogIndexInArr < len(rf.log) {
+
+	// check if the snapshot describes a prefix of this raft server's log
+	// if there's no log in this raft server, the snapshot contains new information
+	if firstLogIndex != -1 && lastIncludedLogIndexInArr < len(rf.log) {
 		if rf.log[lastIncludedLogIndexInArr].Term == args.LastIncludedTerm {
 			rf.log = rf.log[lastIncludedLogIndexInArr+1:]
 			state := rf.encodeRaftState()
 			rf.persister.SaveStateAndSnapshot(state, args.Data)
+			if rf.lastApplied < args.LastIncludedIndex {
+				rf.lastApplied = args.LastIncludedIndex
+			}
 			DPrintf("[%d] exiting", rf.me)
 			return
 		}

@@ -188,20 +188,20 @@ func (kv *KVServer) chanListener() {
 		}
 
 		kv.applied[msg.CommandIndex] = msg
-		kv.cond.Broadcast()
 		kv.lastApplied = msg.CommandIndex
 		kv.mu.Unlock()
+		kv.cond.Broadcast()
 	}
 }
 
 func (kv *KVServer) snapshot() {
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
+	kv.mu.Lock()
 	encoder.Encode(kv.db)
-	DPrintf("[%d]snapshot size: %d", kv.me, len(w.Bytes()))
 	encoder.Encode(kv.putAppendFinished)
-	DPrintf("[%d]total size: %d, AppendFinishedLen: %d", kv.me, len(w.Bytes()), len(kv.putAppendFinished))
 	index := kv.lastApplied
+	kv.mu.Unlock()
 	kv.rf.Snapshot(w.Bytes(), index)
 }
 
@@ -218,7 +218,7 @@ func (kv *KVServer) raftStateSizeMonitor() {
 	for !kv.killed() {
 		kv.cond.Wait()
 		if kv.rf.GetRaftStateSize() > kv.maxraftstate {
-			kv.snapshot()
+			go kv.snapshot()
 		}
 	}
 	kv.mu.Unlock()

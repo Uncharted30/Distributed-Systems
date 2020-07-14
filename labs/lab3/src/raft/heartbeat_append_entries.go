@@ -51,32 +51,41 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	lastLogIndex, _ := rf.getLastLogInfo()
 	firstLogIndex := rf.getFirstLogIndex()
 	// to locate prevLog in the args after snapshotting
-	thisPrevLogIndex := args.PrevLogIndex - firstLogIndex
+	prevLogIndexInArr := args.PrevLogIndex - firstLogIndex
 	//DPrintf("%d %d, %d %d", lastLogEntry.Index, lastLogEntry.Term, args.PrevLogIndex, args.PrevLogTerm)
-	DPrintf("[%d - %d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d, entries len: %d, prevLogIndex: %d, lastLogIndex: %d", rf.me, rf.state, args.LeaderId, rf.commitIndex, rf.lastApplied, rf.currentTerm, len(args.Entries), args.PrevLogIndex, lastLogIndex)
+	DPrintf("[%d - %d] get AppendEntries request from %d, current commit index: %d, last applied: %d, term: %d, entries len: %d, prevLogIndex: %d, lastLogIndex: %d, current log len: %d", rf.me, rf.state, args.LeaderId, rf.commitIndex, rf.lastApplied, rf.currentTerm, len(args.Entries), args.PrevLogIndex, lastLogIndex, len(rf.log))
 
+	reply.Success = false
+	reply.XLen = lastLogIndex + 1
+	reply.XIndex = -1
+	reply.XTerm = -1
 
-	// checks if this server has lastLogEntry
-	// with quick roll back
-	if firstLogIndex != -1 || lastLogIndex != args.PrevLogIndex {
-		if firstLogIndex == -1 || lastLogIndex < args.PrevLogIndex || rf.log[thisPrevLogIndex].Term != args.PrevLogTerm {
-			reply.Success = false
-			reply.XLen = lastLogIndex + 1
-
-			if lastLogIndex < args.PrevLogIndex || firstLogIndex == -1 {
-				reply.XIndex = -1
-				reply.XTerm = -1
-			} else {
-				reply.XTerm = rf.log[thisPrevLogIndex].Term
-				i := rf.log[thisPrevLogIndex].Index - 1
+	if firstLogIndex == -1 {
+		// if there's no log entry in the log array because of snapshotting
+		// check if lastIncludedIndex is PrevLogIndex in the request args
+		if lastLogIndex != args.PrevLogIndex {
+			return
+		}
+	} else {
+		// no log entry in given preLogIndex
+		if lastLogIndex < args.PrevLogIndex {
+			return
+		} else {
+			// if prevLogIndexInArr is smaller than 0
+			// it is in the last snapshot of this rf server
+			// so we already have that log entry
+			// we just need to worry about the situation when it is larger than or equal to 0
+			if prevLogIndexInArr >= 0 && rf.log[prevLogIndexInArr].Term != args.PrevLogTerm {
+				reply.XTerm = rf.log[prevLogIndexInArr].Term
+				i := rf.log[prevLogIndexInArr].Index - 1
 				for ; i > 0; i-- {
 					if rf.log[i].Term != reply.XTerm {
 						break
 					}
 				}
 				reply.XIndex = i + 1
+				return
 			}
-			return
 		}
 	}
 
@@ -128,25 +137,28 @@ func (rf *Raft) sendHeartBeat() {
 		lastLogIndex, _ := rf.getLastLogInfo()
 		firstLogIndex := rf.getFirstLogIndex()
 
-		if firstLogIndex == -1 || rf.nextIndex[i] < firstLogIndex {
-			DPrintf("[%d] nextIndex: %d, firstLogIndex: %d", rf.me, rf.nextIndex, firstLogIndex)
-			go rf.sendSnapshot(i)
-			rf.mu.Unlock()
-			continue
-		}
-
 		// new log entries to be sent to peers
 		var entries []LogEntry
-		nextIndex := rf.nextIndex[i] - firstLogIndex
+		nextIndexInArr := rf.nextIndex[i] - firstLogIndex
+		var prevLogIndex, prevLogTerm int
 
 		if rf.nextIndex[i] <= lastLogIndex {
-			entries = rf.log[nextIndex:]
+			// checks if sending snapshot is needed, if log len in this raft server is 0
+			// nextIndex[i] must be included in latest snapshot since lastLogIndex == lastIncludedLogIndex
+			if firstLogIndex == -1 || rf.nextIndex[i] < firstLogIndex {
+				go rf.sendSnapshot(i)
+				rf.mu.Unlock()
+				continue
+			}
+			entries = rf.log[nextIndexInArr:]
+			prevLogIndex, prevLogTerm = rf.getPrevLogInfo(nextIndexInArr)
 		} else {
 			entries = make([]LogEntry, 0)
+			prevLogIndex, prevLogTerm = rf.getLastLogInfo()
 		}
 
 		DPrintf("[%d] Sending appendEntries to %d, lastLogIndex: %d, nextIndex: %d", rf.me, i, lastLogIndex, rf.nextIndex[i])
-		prevLogIndex, prevLogTerm := rf.getPrevLogInfo(nextIndex)
+
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,

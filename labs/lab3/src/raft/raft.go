@@ -46,7 +46,7 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 	CommandTerm  int
-	IsSnapshot bool
+	IsSnapshot   bool
 }
 
 // A Go object implementing a log entry
@@ -86,20 +86,20 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	currentTerm int
-	votedFor    int
-	log         []LogEntry
-	commitIndex int
-	lastApplied int
-	nextIndex   []int
-	matchIndex  []int
-	state       int
-	timer       *time.Timer
-	applyCh     chan ApplyMsg
-	cond        *sync.Cond
-	matchCount  map[int]int
+	currentTerm          int
+	votedFor             int
+	log                  []LogEntry
+	commitIndex          int
+	lastApplied          int
+	nextIndex            []int
+	matchIndex           []int
+	state                int
+	timer                *time.Timer
+	applyCh              chan ApplyMsg
+	cond                 *sync.Cond
+	matchCount           map[int]int
 	lastIncludedLogIndex int
-	lastIncludedLogTerm int
+	lastIncludedLogTerm  int
 }
 
 // return currentTerm and whether this server
@@ -184,6 +184,7 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.cond.Wait()
 
+		DPrintf("[%d] last applied: %d", rf.me, rf.lastApplied)
 		if rf.state == leader {
 			DPrintf("match index of 1 is: %d", rf.matchIndex[1])
 			for i := len(rf.log) - 1; i >= 0; i-- {
@@ -211,7 +212,7 @@ func (rf *Raft) applier() {
 			}
 		}
 
-		//DPrintf("[%d]updating commit index...", rf.me)
+		DPrintf("[%d]updating commit index, lastApplied: %d, lastIncludedIndex: %d, logLen: %d", rf.me, rf.lastApplied, rf.lastIncludedLogIndex, len(rf.log))
 		firstLogIndex := rf.getFirstLogIndex()
 		for rf.lastApplied < rf.commitIndex {
 			index := rf.lastApplied + 1 - firstLogIndex
@@ -223,8 +224,13 @@ func (rf *Raft) applier() {
 				CommandTerm:  l.Term,
 			}
 			rf.lastApplied++
-			//DPrintf("[raft] applying log... ")
+			if rf.state == leader {
+				DPrintf("[%d] applying log... ", rf.me)
+			}
 			rf.applyCh <- applyMsg
+			if rf.state == leader {
+				DPrintf("[%d] log applied... ", rf.me)
+			}
 		}
 	}
 	rf.mu.Unlock()
@@ -257,12 +263,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-
 	lastLogIndex, _ := rf.getLastLogInfo()
 	index = lastLogIndex + 1
 	term = rf.currentTerm
 
-	DPrintf("[%d] get new command, index: %d, command: %s", rf.me, index, command)
+	DPrintf("[%d] get new command, index: %d, command: %s, lastApplied: %d", rf.me, index, command, rf.lastApplied)
 
 	newLog := LogEntry{
 		Index:   index,
@@ -309,7 +314,7 @@ func (rf *Raft) getLastLogInfo() (int, int) {
 	if len(rf.log) == 0 {
 		return rf.lastIncludedLogIndex, rf.lastIncludedLogTerm
 	}
-	return rf.log[len(rf.log) - 1].Index, rf.log[len(rf.log) - 1].Term
+	return rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term
 }
 
 // when sending appendEntries request to peers, use this function to get prevLogIndex and prevLogTerm
@@ -318,7 +323,7 @@ func (rf *Raft) getPrevLogInfo(index int) (int, int) {
 	if index == 0 {
 		return rf.lastIncludedLogIndex, rf.lastIncludedLogTerm
 	}
-	return rf.log[index - 1].Index, rf.log[index - 1].Term
+	return rf.log[index-1].Index, rf.log[index-1].Term
 }
 
 // for kv server to monitor raft state size
@@ -354,6 +359,25 @@ func (rf *Raft) getRandomTimeout() time.Duration {
 	return t
 }
 
+func (rf *Raft) readSnapshot() {
+	data := rf.persister.ReadSnapshot()
+
+	if data != nil {
+		DPrintf("[%d] restoring snapshot", rf.me)
+		rf.lastApplied = rf.lastIncludedLogIndex
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      data,
+			IsSnapshot:   true,
+		}
+		go func() {
+			rf.mu.Lock()
+			rf.applyCh <- applyMsg
+			rf.mu.Unlock()
+		}()
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -385,6 +409,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.readSnapshot()
 
 	go rf.applier()
 	go rf.timeout()
