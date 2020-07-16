@@ -276,7 +276,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applied = make(map[int]raft.ApplyMsg)
 	kv.putAppendFinished = make(map[string]EmptyStruct)
 	go kv.chanListener()
-	go kv.raftStateSizeMonitor()
+	if maxraftstate > 0 {
+		go kv.raftStateSizeMonitor()
+	}
 
 	return kv
 }
