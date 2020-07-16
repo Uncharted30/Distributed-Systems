@@ -75,6 +75,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
+	if args.Term > rf.currentTerm {
+		rf.state = follower
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+
 	// update snapshot info
 	rf.lastIncludedLogIndex = args.LastIncludedIndex
 	rf.lastIncludedLogTerm = args.LastIncludedTerm
@@ -86,25 +92,34 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// check if the snapshot describes a prefix of this raft server's log
 	// if there's no log in this raft server, the snapshot contains new information
 	if firstLogIndex != -1 && lastIncludedLogIndexInArr < len(rf.log) {
+		// the Raft paper is not clear about how to deal with the case where the snapshot describes a prefix of
+		// this server's log, if we do not send the snapshot to kv server and delete entries before the last included
+		// index, this server may not know that the deleted log is committed and applied, so I also send the snapshot
+		// to kv server even if the snapshot describes a prefix of its log
 		if rf.log[lastIncludedLogIndexInArr].Term == args.LastIncludedTerm {
 			rf.log = rf.log[lastIncludedLogIndexInArr+1:]
-			state := rf.encodeRaftState()
-			rf.persister.SaveStateAndSnapshot(state, args.Data)
 			if rf.lastApplied < args.LastIncludedIndex {
 				rf.lastApplied = args.LastIncludedIndex
 			}
+
+			if rf.commitIndex < args.LastIncludedIndex {
+				rf.commitIndex = args.LastIncludedIndex
+			}
 			DPrintf("[%d] exiting", rf.me)
-			return
 		}
+	} else {
+		rf.log = make([]LogEntry, 0)
+		rf.lastApplied = args.LastIncludedIndex
+		rf.commitIndex = args.LastIncludedIndex
 	}
 
-	rf.log = make([]LogEntry, 0)
+
 
 	DPrintf("[%d] encoding state and snapshot...", rf.me)
 	state := rf.encodeRaftState()
 	rf.persister.SaveStateAndSnapshot(state, args.Data)
 
-	rf.lastApplied = args.LastIncludedIndex
+
 
 	applyMsg := ApplyMsg{
 		CommandValid: true,
@@ -137,7 +152,9 @@ func (rf *Raft) sendSnapshot(server int) {
 	if ok {
 		rf.mu.Lock()
 		if reply.Status {
-			rf.nextIndex[server] = rf.lastIncludedLogIndex + 1
+			if rf.nextIndex[server] < rf.lastIncludedLogIndex + 1 {
+				rf.nextIndex[server] = rf.lastIncludedLogIndex + 1
+			}
 		} else {
 			if reply.Term > rf.currentTerm {
 				rf.state = follower

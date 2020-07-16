@@ -77,13 +77,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// we just need to worry about the situation when it is larger than or equal to 0
 			if prevLogIndexInArr >= 0 && rf.log[prevLogIndexInArr].Term != args.PrevLogTerm {
 				reply.XTerm = rf.log[prevLogIndexInArr].Term
-				i := rf.log[prevLogIndexInArr].Index - 1
-				for ; i > 0; i-- {
+				i := prevLogIndexInArr - 1
+				for ; i >= 0; i-- {
 					if rf.log[i].Term != reply.XTerm {
 						break
 					}
 				}
-				reply.XIndex = i + 1
+				// find the index of first log in conflicting term
+				if i >= 0 {
+					reply.XIndex = rf.log[i].Index + 1
+				} else {
+					if rf.lastIncludedLogTerm == reply.XTerm {
+						reply.XIndex = rf.lastIncludedLogIndex + 1
+					} else {
+						reply.XIndex = rf.log[0].Index + 1
+					}
+				}
+
 				return
 			}
 		}
@@ -96,7 +106,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if l.Index <= lastLogIndex {
 			// if there's term conflict, delete all entries from that entry index
 			logIndex := l.Index - firstLogIndex
-			if rf.log[logIndex].Term != l.Term {
+			// if logIndex < 0, it's already in the latest snapshot
+			if logIndex >= 0 && rf.log[logIndex].Term != l.Term {
 				rf.log = rf.log[0:logIndex]
 				lastLogIndex, _ = rf.getLastLogInfo()
 			} else {
