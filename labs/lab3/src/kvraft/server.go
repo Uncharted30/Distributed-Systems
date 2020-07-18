@@ -38,7 +38,7 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	applied map[int]raft.ApplyMsg
+	applied map[int]int
 	cond *sync.Cond
 	db map[string]string
 	putAppendFinished map[string]EmptyStruct
@@ -67,18 +67,17 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	kv.waitingOption[index] = void
 
 	DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
 
 	kv.mu.Lock()
+	kv.waitingOption[index] = void
 	for !kv.killed() {
 		kv.cond.Wait()
-		msg, ok := kv.applied[index]
+		resultTerm, ok := kv.applied[index]
 		DPrintf("[%d] checking GET response of op index %d...", kv.me, index)
 		if ok {
-			if msg.CommandTerm == term {
-				op = msg.Command.(Op)
+			if resultTerm == term {
 				v, ok := kv.db[op.Key]
 				if !ok {
 					reply.Err = ErrNoKey
@@ -132,21 +131,22 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	kv.waitingOption[index] = void
 
 	kv.mu.Lock()
+	kv.waitingOption[index] = void
 	DPrintf("[%d] Start waiting for PUT/APPEND response of op index %d...", kv.me, index)
 	for !kv.killed() {
 		kv.cond.Wait()
-		msg, ok := kv.applied[index]
+		resultTerm, ok := kv.applied[index]
 		DPrintf("[%d] checking PUT/APPEND response of op index %d...", kv.me, index)
 		if ok {
-			if msg.CommandTerm == term {
+			if resultTerm == term {
 				reply.Err = OK
 			} else {
 				reply.Err = ErrWrongLeader
 			}
 			delete(kv.applied, index)
+			delete(kv.waitingOption, index)
 			break
 		}
 	}
@@ -159,14 +159,7 @@ func (kv *KVServer) chanListener() {
 		kv.mu.Lock()
 
 		if msg.IsSnapshot {
-			r := bytes.NewBuffer(msg.Command.([]byte))
-			decoder := labgob.NewDecoder(r)
-			err1 := decoder.Decode(&kv.db)
-			err2 := decoder.Decode(&kv.putAppendFinished)
-
-			if err1 != nil || err2 != nil{
-				log.Fatalf("Failed to decode snapshot")
-			}
+			kv.decodeSnapshot(msg)
 			kv.mu.Unlock()
 			continue
 		}
@@ -196,7 +189,10 @@ func (kv *KVServer) chanListener() {
 			}
 		}
 
-		kv.applied[msg.CommandIndex] = msg
+		_, waiting := kv.waitingOption[msg.CommandIndex]
+		if waiting {
+			kv.applied[msg.CommandIndex] = msg.CommandTerm
+		}
 		kv.lastApplied = msg.CommandIndex
 		kv.mu.Unlock()
 		kv.cond.Broadcast()
@@ -213,6 +209,27 @@ func (kv *KVServer) snapshot() {
 	index := kv.lastApplied
 	kv.mu.Unlock()
 	kv.rf.Snapshot(w.Bytes(), index)
+}
+
+func (kv *KVServer) decodeSnapshot(msg raft.ApplyMsg) {
+	indexTerm := make(map[int]int)
+
+	r := bytes.NewBuffer(msg.Command.([]byte))
+	decoder := labgob.NewDecoder(r)
+	err1 := decoder.Decode(&kv.db)
+	err2 := decoder.Decode(&kv.putAppendFinished)
+	err3 := decoder.Decode(&indexTerm)
+
+	if err1 != nil || err2 != nil || err3 != nil{
+		log.Fatalf("Failed to decode snapshot")
+	}
+
+	for key := range kv.waitingOption {
+		term, ok := indexTerm[key]
+		if ok {
+			kv.applied[key] = term
+		}
+	}
 }
 
 func (kv *KVServer) removeReceived(opIds []string) {
@@ -283,8 +300,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.cond = sync.NewCond(&kv.mu)
 	kv.db = make(map[string]string)
-	kv.applied = make(map[int]raft.ApplyMsg)
+	kv.applied = make(map[int]int)
 	kv.putAppendFinished = make(map[string]EmptyStruct)
+	kv.waitingOption = make(map[int]EmptyStruct)
 	go kv.chanListener()
 	if maxraftstate > 0 {
 		go kv.raftStateSizeMonitor()

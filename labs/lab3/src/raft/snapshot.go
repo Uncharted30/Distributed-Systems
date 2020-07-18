@@ -42,11 +42,27 @@ func (rf *Raft) Snapshot(snapshot []byte, index int) {
 	state := w.Bytes()
 	DPrintf("[%d] state size: %d", rf.me, len(state))
 
+	indexTerm := make(map[int]int)
+	if firstLogIndex > 0 {
+		buffer := bytes.NewBuffer(rf.persister.ReadSnapshot())
+		decoder := labgob.NewDecoder(buffer)
+		decoder.Decode(&indexTerm)
+		for _, log := range rf.log {
+			indexTerm[log.Index] = log.Term
+		}
+	}
+
+	writeBuffer := new(bytes.Buffer)
+	indexTermEncoder := labgob.NewEncoder(writeBuffer)
+	indexTermEncoder.Encode(indexTerm)
+
+	snapshot = append(snapshot, writeBuffer.Bytes()...)
+
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 	rf.lastIncludedLogIndex = lastIncludedLogIndex
 	rf.lastIncludedLogTerm = lastIncludedLogTerm
-	// Discard logs
 
+	// Discard logs
 	DPrintf("[%d] Snapshot taken, current first log index: %d, last included index: %d", rf.me, firstLogIndex, lastIncludedLogIndex)
 	rf.log = rf.log[lastIncludedIndexInArr+1:]
 }
