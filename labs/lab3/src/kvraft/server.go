@@ -43,6 +43,7 @@ type KVServer struct {
 	db map[string]string
 	putAppendFinished map[string]EmptyStruct
 	lastApplied int
+	waitingOption map[int]EmptyStruct
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -59,19 +60,22 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Key:    args.Key,
 	}
 
+
 	index, term, isLeader := kv.rf.Start(op)
 
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.waitingOption[index] = void
 
-	//DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
+	DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
 
 	kv.mu.Lock()
 	for !kv.killed() {
 		kv.cond.Wait()
 		msg, ok := kv.applied[index]
+		DPrintf("[%d] checking GET response of op index %d...", kv.me, index)
 		if ok {
 			if msg.CommandTerm == term {
 				op = msg.Command.(Op)
@@ -85,7 +89,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			} else {
 				reply.Err = ErrWrongLeader
 			}
+
 			delete(kv.applied, index)
+			delete(kv.waitingOption, index)
 			break
 		}
 	}
@@ -126,12 +132,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.waitingOption[index] = void
 
 	kv.mu.Lock()
+	DPrintf("[%d] Start waiting for PUT/APPEND response of op index %d...", kv.me, index)
 	for !kv.killed() {
-		//DPrintf("[%d] Start waiting for PUT/APPEND response of op index %d...", kv.me, index)
 		kv.cond.Wait()
 		msg, ok := kv.applied[index]
+		DPrintf("[%d] checking PUT/APPEND response of op index %d...", kv.me, index)
 		if ok {
 			if msg.CommandTerm == term {
 				reply.Err = OK
@@ -150,20 +158,21 @@ func (kv *KVServer) chanListener() {
 		//DPrintf("[%d] Get msg from applyCh for op index %d", kv.me, msg.CommandIndex)
 		kv.mu.Lock()
 
-		if msg.Command != nil {
-			if msg.IsSnapshot {
-				r := bytes.NewBuffer(msg.Command.([]byte))
-				decoder := labgob.NewDecoder(r)
-				err1 := decoder.Decode(&kv.db)
-				err2 := decoder.Decode(&kv.putAppendFinished)
+		if msg.IsSnapshot {
+			r := bytes.NewBuffer(msg.Command.([]byte))
+			decoder := labgob.NewDecoder(r)
+			err1 := decoder.Decode(&kv.db)
+			err2 := decoder.Decode(&kv.putAppendFinished)
 
-				if err1 != nil || err2 != nil{
-					log.Fatalf("Failed to decode snapshot")
-				}
-				kv.mu.Unlock()
-				continue
+			if err1 != nil || err2 != nil{
+				log.Fatalf("Failed to decode snapshot")
 			}
+			kv.mu.Unlock()
+			continue
+		}
 
+		DPrintf("[%d] apply msg for op %d", kv.me, msg.CommandIndex)
+		if msg.Command != nil {
 			op := msg.Command.(Op)
 			_, finished := kv.putAppendFinished[op.OpId]
 
@@ -195,6 +204,7 @@ func (kv *KVServer) chanListener() {
 }
 
 func (kv *KVServer) snapshot() {
+	DPrintf("[%d] snapshotting!!", kv.me)
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
 	kv.mu.Lock()

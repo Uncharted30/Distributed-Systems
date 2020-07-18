@@ -168,7 +168,7 @@ func (rf *Raft) sendHeartBeat() {
 			prevLogIndex, prevLogTerm = rf.getLastLogInfo()
 		}
 
-		DPrintf("[%d] Sending appendEntries to %d, lastLogIndex: %d, nextIndex: %d", rf.me, i, lastLogIndex, rf.nextIndex[i])
+		DPrintf("[%d] Sending appendEntries to %d, lastLogIndex: %d, nextIndex: %d, logLen: %d", rf.me, i, lastLogIndex, rf.nextIndex[i], len(rf.log))
 
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,

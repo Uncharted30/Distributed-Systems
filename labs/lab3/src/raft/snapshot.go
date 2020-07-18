@@ -47,18 +47,8 @@ func (rf *Raft) Snapshot(snapshot []byte, index int) {
 	rf.lastIncludedLogTerm = lastIncludedLogTerm
 	// Discard logs
 
-	if len(rf.log) > 0 {
-		firstLogIndex = -1
-	} else {
-		firstLogIndex = rf.log[0].Index
-	}
 	DPrintf("[%d] Snapshot taken, current first log index: %d, last included index: %d", rf.me, firstLogIndex, lastIncludedLogIndex)
 	rf.log = rf.log[lastIncludedIndexInArr+1:]
-	//newLog := make([]LogEntry, 0)
-	//for i := lastIncludedIndexInArr + 1; i < len(rf.log); i++ {
-	//	newLog = append(newLog, rf.log[i])
-	//}
-	//rf.log = newLog
 }
 
 // InstallSnapshot RPC
@@ -81,6 +71,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.votedFor = -1
 	}
 
+	applyMsg := ApplyMsg{
+		CommandValid: true,
+		Command:      args.Data,
+		IsSnapshot:   true,
+	}
+
 	// update snapshot info
 	rf.lastIncludedLogIndex = args.LastIncludedIndex
 	rf.lastIncludedLogTerm = args.LastIncludedTerm
@@ -100,6 +96,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			rf.log = rf.log[lastIncludedLogIndexInArr+1:]
 			if rf.lastApplied < args.LastIncludedIndex {
 				rf.lastApplied = args.LastIncludedIndex
+				DPrintf("[%d] sending snapshot to applyCh", rf.me)
+				rf.applyCh <- applyMsg
 			}
 
 			if rf.commitIndex < args.LastIncludedIndex {
@@ -111,24 +109,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.log = make([]LogEntry, 0)
 		rf.lastApplied = args.LastIncludedIndex
 		rf.commitIndex = args.LastIncludedIndex
+		DPrintf("[%d] sending snapshot to applyCh", rf.me)
+		rf.applyCh <- applyMsg
 	}
-
-
 
 	DPrintf("[%d] encoding state and snapshot...", rf.me)
 	state := rf.encodeRaftState()
 	rf.persister.SaveStateAndSnapshot(state, args.Data)
-
-
-
-	applyMsg := ApplyMsg{
-		CommandValid: true,
-		Command:      args.Data,
-		IsSnapshot:   true,
-	}
-
-	DPrintf("[%d] sending snapshot to applyCh", rf.me)
-	rf.applyCh <- applyMsg
 }
 
 func (rf *Raft) sendSnapshot(server int) {
