@@ -17,15 +17,16 @@ const (
 )
 
 type Op struct {
-	OpType int
-	Key    string
-	Value  string
-	OpId string
+	OpType        int
+	Key           string
+	Value         string
+	OpId          string
 	ReplyReceived []string
 }
 
 // used to describe a set using map
-type EmptyStruct struct {}
+type EmptyStruct struct{}
+
 var void EmptyStruct
 
 type KVServer struct {
@@ -38,12 +39,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	applied map[int]int
-	cond *sync.Cond
-	db map[string]string
+	cond              *sync.Cond
+	db                map[string]string
 	putAppendFinished map[string]EmptyStruct
-	lastApplied int
-	waitingOption map[int]EmptyStruct
+	lastApplied       int
+	waitingOption     map[int]chan int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -60,7 +60,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Key:    args.Key,
 	}
 
-
 	index, term, isLeader := kv.rf.Start(op)
 
 	if !isLeader {
@@ -68,33 +67,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
+	res := kv.waitResult(index, term)
 
-	kv.mu.Lock()
-	kv.waitingOption[index] = void
-	for !kv.killed() {
-		kv.cond.Wait()
-		resultTerm, ok := kv.applied[index]
-		DPrintf("[%d] checking GET response of op index %d...", kv.me, index)
-		if ok {
-			if resultTerm == term {
-				v, ok := kv.db[op.Key]
-				if !ok {
-					reply.Err = ErrNoKey
-				} else {
-					reply.Err = OK
-					reply.Value = v
-				}
-			} else {
-				reply.Err = ErrWrongLeader
-			}
-
-			delete(kv.applied, index)
-			delete(kv.waitingOption, index)
-			break
+	if res {
+		kv.mu.Lock()
+		v, ok := kv.db[op.Key]
+		kv.mu.Unlock()
+		if !ok {
+			reply.Err = ErrNoKey
+		} else {
+			reply.Err = OK
+			reply.Value = v
 		}
+	} else {
+		reply.Err = ErrWrongLeader
 	}
-	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -114,10 +101,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	op := Op{
-		Key:    args.Key,
-		Value:  args.Value,
+		Key:           args.Key,
+		Value:         args.Value,
 		ReplyReceived: args.ReplyReceived,
-		OpId: args.OpId,
+		OpId:          args.OpId,
 	}
 
 	if args.Op == "Put" {
@@ -132,25 +119,28 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	kv.mu.Lock()
-	kv.waitingOption[index] = void
-	DPrintf("[%d] Start waiting for PUT/APPEND response of op index %d...", kv.me, index)
-	for !kv.killed() {
-		kv.cond.Wait()
-		resultTerm, ok := kv.applied[index]
-		DPrintf("[%d] checking PUT/APPEND response of op index %d...", kv.me, index)
-		if ok {
-			if resultTerm == term {
-				reply.Err = OK
-			} else {
-				reply.Err = ErrWrongLeader
-			}
-			delete(kv.applied, index)
-			delete(kv.waitingOption, index)
-			break
-		}
+	res := kv.waitResult(index, term)
+
+	if res {
+		reply.Err = OK
+	} else {
+		reply.Err = ErrWrongLeader
 	}
+}
+
+func (kv *KVServer) waitResult(index int, term int) bool {
+	DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
+	ch := make(chan int, 1)
+	kv.mu.Lock()
+	kv.waitingOption[index] = ch
 	kv.mu.Unlock()
+	resultTerm := <-ch
+
+	if resultTerm == term {
+		return true
+	} else {
+		return false
+	}
 }
 
 func (kv *KVServer) chanListener() {
@@ -189,9 +179,10 @@ func (kv *KVServer) chanListener() {
 			}
 		}
 
-		_, waiting := kv.waitingOption[msg.CommandIndex]
+		ch, waiting := kv.waitingOption[msg.CommandIndex]
 		if waiting {
-			kv.applied[msg.CommandIndex] = msg.CommandTerm
+			ch <- msg.CommandTerm
+			delete(kv.waitingOption, msg.CommandIndex)
 		}
 		kv.lastApplied = msg.CommandIndex
 		kv.mu.Unlock()
@@ -220,14 +211,14 @@ func (kv *KVServer) decodeSnapshot(msg raft.ApplyMsg) {
 	err2 := decoder.Decode(&kv.putAppendFinished)
 	err3 := decoder.Decode(&indexTerm)
 
-	if err1 != nil || err2 != nil || err3 != nil{
+	if err1 != nil || err2 != nil || err3 != nil {
 		log.Fatalf("Failed to decode snapshot")
 	}
 
-	for key := range kv.waitingOption {
+	for key, ch := range kv.waitingOption {
 		term, ok := indexTerm[key]
 		if ok {
-			kv.applied[key] = term
+			ch <- term
 		}
 	}
 }
@@ -300,9 +291,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.cond = sync.NewCond(&kv.mu)
 	kv.db = make(map[string]string)
-	kv.applied = make(map[int]int)
 	kv.putAppendFinished = make(map[string]EmptyStruct)
-	kv.waitingOption = make(map[int]EmptyStruct)
+	kv.waitingOption = make(map[int]chan int)
 	go kv.chanListener()
 	if maxraftstate > 0 {
 		go kv.raftStateSizeMonitor()
