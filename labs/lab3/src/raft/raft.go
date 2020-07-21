@@ -126,8 +126,6 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	data := rf.encodeRaftState()
 	rf.persister.SaveRaftState(data)
 }
@@ -230,13 +228,7 @@ func (rf *Raft) applyCommand() {
 			CommandTerm:  l.Term,
 		}
 		rf.lastApplied++
-		if rf.state == leader {
-			DPrintf("[%d] applying log... ", rf.me)
-		}
 		rf.applyCh <- applyMsg
-		if rf.state == leader {
-			DPrintf("[%d] log applied... ", rf.me)
-		}
 	}
 }
 
@@ -280,9 +272,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.log = append(rf.log, newLog)
-	go rf.persist()
+	rf.persist()
 	defer func() {
-		rf.timer.Reset(5 * time.Millisecond)
+		rf.timer.Reset(1 * time.Millisecond)
 	}()
 
 	return index, term, isLeader

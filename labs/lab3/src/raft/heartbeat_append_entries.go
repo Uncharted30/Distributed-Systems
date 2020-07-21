@@ -130,7 +130,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if changed {
-		go rf.persist()
+		rf.persist()
 	}
 }
 
@@ -255,7 +255,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				rf.state = follower
 				rf.votedFor = -1
 				rf.timer.Reset(rf.getRandomTimeout())
-				go rf.persist()
+				rf.persist()
 			}
 		}
 		rf.mu.Unlock()

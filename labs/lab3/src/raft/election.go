@@ -39,7 +39,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = follower
 		rf.votedFor = -1
-		go rf.persist()
+		rf.persist()
 	}
 	reply.Term = rf.currentTerm
 
@@ -59,7 +59,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 					reply.VoteGranted = true
 					rf.votedFor = args.CandidateId
 					rf.timer.Reset(rf.getRandomTimeout())
-					go rf.persist()
+					rf.persist()
 					return
 				} else {
 					reply.VoteGranted = false
@@ -71,7 +71,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				reply.VoteGranted = true
 				rf.votedFor = args.CandidateId
 				rf.timer.Reset(rf.getRandomTimeout())
-				go rf.persist()
+				rf.persist()
 				return
 			} else {
 				reply.VoteGranted = false
@@ -122,7 +122,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
 			rf.state = follower
-			go rf.persist()
+			rf.persist()
 		}
 	}
 	return ok
@@ -143,7 +143,7 @@ func (rf *Raft) startElection() {
 		LastLogTerm:  lastLogTerm,
 	}
 	rf.mu.Unlock()
-	go rf.persist()
+	rf.persist()
 	rf.requestVotes(&args)
 }
 
@@ -217,7 +217,7 @@ func (rf *Raft) becomeLeader() {
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.mu.Unlock()
-	//rf.Start(nil)
+	rf.Start(nil)
 	rf.sendHeartBeat()
 	rf.timer.Reset(heartbeat * time.Millisecond)
 }
