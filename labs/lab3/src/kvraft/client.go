@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"../labrpc"
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -67,20 +68,19 @@ func (ck *Clerk) Get(key string) string {
 		}
 	}
 
-	reply = GetReply{}
 	for {
 		for i, server := range ck.servers {
+			reply = GetReply{}
 			ok := server.Call("KVServer.Get", &args, &reply)
 			if ok {
 				if reply.Err == OK {
-					DPrintf("Get result is %s", reply.Value)
+					DPrintf("Get %s result is %s", args.Key, reply.Value)
 					ck.lastLeader = i
 					return reply.Value
 				} else if reply.Err == ErrNoKey {
 					return ""
 				}
 			}
-			reply = GetReply{}
 		}
 	}
 }
@@ -100,7 +100,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	DPrintf("Put append request, key is %s, value is %s", key, value)
 
 	ck.mu.Lock()
-	DPrintf("reply received len: %d", len(ck.replyReceived))
 	opId := strconv.FormatInt(ck.cid, 10) + strconv.FormatInt(time.Now().UnixNano(), 10)
 	args := PutAppendArgs{
 		Key:           key,
@@ -125,18 +124,18 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 	}
 
-	DPrintf("Failed... Probing leader!!!")
-
 	reply = PutAppendReply{}
 	for {
 		for i, server := range ck.servers {
 			ok := server.Call("KVServer.PutAppend", &args, &reply)
 			if ok {
+				log.Printf("result: %s\n", reply.Err)
 				if reply.Err == OK {
 					ck.lastLeader = i
 					ck.mu.Lock()
 					ck.replyReceived = append(ck.replyReceived, args.OpId)
 					ck.mu.Unlock()
+					DPrintf("Put append request succeed, key is %s, value is %s", key, value)
 					return
 				}
 			}

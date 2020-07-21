@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -23,6 +24,8 @@ type Op struct {
 	OpId          string
 	ReplyReceived []string
 }
+
+const WaitReplyTimeOut = time.Millisecond * 500
 
 // used to describe a set using map
 type EmptyStruct struct{}
@@ -44,6 +47,7 @@ type KVServer struct {
 	putAppendFinished map[string]EmptyStruct
 	lastApplied       int
 	waitingOption     map[int]chan int
+	snapshotLastIncluded int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -60,27 +64,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Key:    args.Key,
 	}
 
-	index, term, isLeader := kv.rf.Start(op)
+	res := kv.waitResult(op)
 
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-
-	res := kv.waitResult(index, term)
-
-	if res {
+	reply.Err = res
+	if res == OK {
 		kv.mu.Lock()
-		v, ok := kv.db[op.Key]
+		value, ok := kv.db[args.Key]
 		kv.mu.Unlock()
-		if !ok {
-			reply.Err = ErrNoKey
+		if ok {
+			reply.Value = value
 		} else {
-			reply.Err = OK
-			reply.Value = v
+			reply.Err = ErrNoKey
 		}
-	} else {
-		reply.Err = ErrWrongLeader
 	}
 }
 
@@ -113,33 +108,49 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		op.OpType = APPEND
 	}
 
-	index, term, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
+	res := kv.waitResult(op)
 
-	res := kv.waitResult(index, term)
-
-	if res {
-		reply.Err = OK
-	} else {
-		reply.Err = ErrWrongLeader
-	}
+	reply.Err = res
 }
 
-func (kv *KVServer) waitResult(index int, term int) bool {
-	DPrintf("[%d] Start waiting for GET response of op index %d...", kv.me, index)
+func (kv *KVServer) waitResult(op Op) Err {
+
 	ch := make(chan int, 1)
+	index, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		return ErrWrongLeader
+	}
+
 	kv.mu.Lock()
 	kv.waitingOption[index] = ch
 	kv.mu.Unlock()
-	resultTerm := <-ch
+	log.Printf("Start waiting for %d\n", index)
+	defer log.Printf("%d finished\n", index)
 
+	timer := time.NewTimer(time.Millisecond * WaitReplyTimeOut)
+	defer timer.Stop()
+
+	resultTerm := -1
+	select {
+		// Looks like this won't fire...
+	case <-timer.C:
+		log.Println("Timeout")
+		kv.mu.Lock()
+		delete(kv.waitingOption, index)
+		kv.mu.Unlock()
+		return ErrTimeOut
+	case term := <- ch:
+		kv.mu.Lock()
+		delete(kv.waitingOption, index)
+		kv.mu.Unlock()
+		resultTerm = term
+	}
+
+	log.Printf("%d result term is %d", index, resultTerm)
 	if resultTerm == term {
-		return true
+		return OK
 	} else {
-		return false
+		return ErrWrongLeader
 	}
 }
 
@@ -150,11 +161,16 @@ func (kv *KVServer) chanListener() {
 
 		if msg.IsSnapshot {
 			kv.decodeSnapshot(msg)
+			for index, ch := range kv.waitingOption {
+				if index <= kv.snapshotLastIncluded {
+					ch <- -1
+				}
+			}
 			kv.mu.Unlock()
 			continue
 		}
 
-		DPrintf("[%d] apply msg for op %d", kv.me, msg.CommandIndex)
+		log.Printf("[%d] apply msg for op %d", kv.me, msg.CommandIndex)
 		if msg.Command != nil {
 			op := msg.Command.(Op)
 			_, finished := kv.putAppendFinished[op.OpId]
@@ -182,7 +198,6 @@ func (kv *KVServer) chanListener() {
 		ch, waiting := kv.waitingOption[msg.CommandIndex]
 		if waiting {
 			ch <- msg.CommandTerm
-			delete(kv.waitingOption, msg.CommandIndex)
 		}
 		kv.lastApplied = msg.CommandIndex
 		kv.mu.Unlock()
@@ -195,31 +210,25 @@ func (kv *KVServer) snapshot() {
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
 	kv.mu.Lock()
+	kv.snapshotLastIncluded = kv.lastApplied
 	encoder.Encode(kv.db)
 	encoder.Encode(kv.putAppendFinished)
+	encoder.Encode(kv.snapshotLastIncluded)
 	index := kv.lastApplied
 	kv.mu.Unlock()
 	kv.rf.Snapshot(w.Bytes(), index)
 }
 
 func (kv *KVServer) decodeSnapshot(msg raft.ApplyMsg) {
-	indexTerm := make(map[int]int)
 
 	r := bytes.NewBuffer(msg.Command.([]byte))
 	decoder := labgob.NewDecoder(r)
 	err1 := decoder.Decode(&kv.db)
 	err2 := decoder.Decode(&kv.putAppendFinished)
-	err3 := decoder.Decode(&indexTerm)
+	err3 := decoder.Decode(&kv.snapshotLastIncluded)
 
 	if err1 != nil || err2 != nil || err3 != nil {
 		log.Fatalf("Failed to decode snapshot")
-	}
-
-	for key, ch := range kv.waitingOption {
-		term, ok := indexTerm[key]
-		if ok {
-			ch <- term
-		}
 	}
 }
 
