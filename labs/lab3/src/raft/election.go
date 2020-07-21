@@ -217,7 +217,7 @@ func (rf *Raft) becomeLeader() {
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.mu.Unlock()
-	rf.Start(nil)
+	//rf.Start(nil)
 	rf.sendHeartBeat()
 	rf.timer.Reset(heartbeat * time.Millisecond)
 }

@@ -70,6 +70,7 @@ const (
 	minTimeout = 350
 	maxTimeout = 500
 	heartbeat  = 100
+	applyTimeout = 100
 )
 
 //
@@ -100,6 +101,7 @@ type Raft struct {
 	matchCount           map[int]int
 	lastIncludedLogIndex int
 	lastIncludedLogTerm  int
+	applyTimer *time.Timer
 }
 
 // return currentTerm and whether this server
@@ -179,61 +181,63 @@ func (rf *Raft) readPersist(data []byte) {
 // if true, apply new committed log to state machine
 // if the server is the leader, check if there is new logs to commit first
 func (rf *Raft) applier() {
-
 	rf.mu.Lock()
 	for !rf.killed() {
 		rf.cond.Wait()
+		rf.applyCommand()
+	}
+	rf.mu.Unlock()
+}
 
-		DPrintf("[%d] last applied: %d", rf.me, rf.lastApplied)
-		if rf.state == leader {
-			DPrintf("match index of 1 is: %d", rf.matchIndex[1])
-			for i := len(rf.log) - 1; i >= 0; i-- {
-				DPrintf("%d %d", rf.log[i].Index, rf.commitIndex)
-				if rf.log[i].Index == rf.commitIndex {
-					break
-				}
+func (rf *Raft) applyCommand() {
+	DPrintf("[%d] last applied: %d", rf.me, rf.lastApplied)
+	if rf.state == leader {
+		DPrintf("match index of 1 is: %d", rf.matchIndex[1])
+		for i := len(rf.log) - 1; i >= 0; i-- {
+			DPrintf("%d %d", rf.log[i].Index, rf.commitIndex)
+			if rf.log[i].Index == rf.commitIndex {
+				break
+			}
 
-				if rf.log[i].Term < rf.currentTerm {
-					break
-				}
+			if rf.log[i].Term < rf.currentTerm {
+				break
+			}
 
-				count := 1
-				for j := range rf.matchIndex {
-					if rf.matchIndex[j] >= rf.log[i].Index {
-						count++
-					}
-				}
-
-				if count > len(rf.peers)/2 {
-					rf.commitIndex = rf.log[i].Index
-					//DPrintf("[%d]new commit index: %d",rf.me, rf.commitIndex)
-					break
+			count := 1
+			for j := range rf.matchIndex {
+				if rf.matchIndex[j] >= rf.log[i].Index {
+					count++
 				}
 			}
-		}
 
-		DPrintf("[%d]updating commit index, lastApplied: %d, lastIncludedIndex: %d, logLen: %d", rf.me, rf.lastApplied, rf.lastIncludedLogIndex, len(rf.log))
-		firstLogIndex := rf.getFirstLogIndex()
-		for rf.lastApplied < rf.commitIndex {
-			index := rf.lastApplied + 1 - firstLogIndex
-			l := rf.log[index]
-			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      l.Command,
-				CommandIndex: l.Index,
-				CommandTerm:  l.Term,
-			}
-			rf.lastApplied++
-			if rf.state == leader {
-				DPrintf("[%d] applying log... ", rf.me)
-			}
-			rf.applyCh <- applyMsg
-			if rf.state == leader {
-				DPrintf("[%d] log applied... ", rf.me)
+			if count > len(rf.peers)/2 {
+				rf.commitIndex = rf.log[i].Index
+				//DPrintf("[%d]new commit index: %d",rf.me, rf.commitIndex)
+				break
 			}
 		}
 	}
-	rf.mu.Unlock()
+
+	DPrintf("[%d]updating commit index, lastApplied: %d, lastIncludedIndex: %d, logLen: %d", rf.me, rf.lastApplied, rf.lastIncludedLogIndex, len(rf.log))
+	firstLogIndex := rf.getFirstLogIndex()
+	for rf.lastApplied < rf.commitIndex {
+		index := rf.lastApplied + 1 - firstLogIndex
+		l := rf.log[index]
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      l.Command,
+			CommandIndex: l.Index,
+			CommandTerm:  l.Term,
+		}
+		rf.lastApplied++
+		if rf.state == leader {
+			DPrintf("[%d] applying log... ", rf.me)
+		}
+		rf.applyCh <- applyMsg
+		if rf.state == leader {
+			DPrintf("[%d] log applied... ", rf.me)
+		}
+	}
 }
 
 //
@@ -277,6 +281,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.log = append(rf.log, newLog)
 	go rf.persist()
+	defer func() {
+		rf.timer.Reset(5 * time.Millisecond)
+	}()
 
 	return index, term, isLeader
 }
@@ -406,6 +413,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.timer = time.NewTimer(rf.getRandomTimeout())
 	rf.cond = sync.NewCond(&rf.mu)
 	rf.applyCh = applyCh
+	rf.applyTimer = time.NewTimer(applyTimeout * time.Millisecond)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -413,6 +421,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.applier()
 	go rf.timeout()
+	go func() {
+		<- rf.applyTimer.C
+		rf.mu.Lock()
+		rf.applyCommand()
+		rf.mu.Unlock()
+		rf.applyTimer.Reset(applyTimeout * time.Millisecond)
+	}()
 
 	return rf
 }

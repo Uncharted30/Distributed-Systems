@@ -198,7 +198,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			return
 		}
 
-		DPrintf("[%d]get AppendEntry reply from %d, result: %s", rf.me, server, reply.Success)
+		//DPrintf("[%d]get AppendEntry reply from %d, result: %s", rf.me, server, reply.Success)
 
 		if reply.Success {
 			if len(args.Entries) > 0 {

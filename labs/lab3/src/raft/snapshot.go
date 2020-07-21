@@ -25,7 +25,7 @@ func (rf *Raft) Snapshot(snapshot []byte, index int) {
 	if rf.lastIncludedLogIndex >= index {
 		return
 	}
-	DPrintf("[%d] logs: %s", rf.me, rf.log)
+	//DPrintf("[%d] logs: %s", rf.me, rf.log)
 	firstLogIndex := rf.getFirstLogIndex()
 
 	lastIncludedIndexInArr := index - firstLogIndex
@@ -41,22 +41,6 @@ func (rf *Raft) Snapshot(snapshot []byte, index int) {
 	encoder.Encode(lastIncludedLogTerm)
 	state := w.Bytes()
 	DPrintf("[%d] state size: %d", rf.me, len(state))
-
-	indexTerm := make(map[int]int)
-	if firstLogIndex > 0 {
-		buffer := bytes.NewBuffer(rf.persister.ReadSnapshot())
-		decoder := labgob.NewDecoder(buffer)
-		decoder.Decode(&indexTerm)
-		for _, log := range rf.log {
-			indexTerm[log.Index] = log.Term
-		}
-	}
-
-	writeBuffer := new(bytes.Buffer)
-	indexTermEncoder := labgob.NewEncoder(writeBuffer)
-	indexTermEncoder.Encode(indexTerm)
-
-	snapshot = append(snapshot, writeBuffer.Bytes()...)
 
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 	rf.lastIncludedLogIndex = lastIncludedLogIndex
