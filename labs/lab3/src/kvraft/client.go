@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"../labrpc"
-	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -124,12 +123,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 	}
 
-	reply = PutAppendReply{}
+
 	for {
 		for i, server := range ck.servers {
+			reply = PutAppendReply{}
 			ok := server.Call("KVServer.PutAppend", &args, &reply)
 			if ok {
-				log.Printf("result: %s\n", reply.Err)
+				DPrintf("result: %s\n", reply.Err)
 				if reply.Err == OK {
 					ck.lastLeader = i
 					ck.mu.Lock()
@@ -139,7 +139,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					return
 				}
 			}
-			reply = PutAppendReply{}
 		}
 	}
 }

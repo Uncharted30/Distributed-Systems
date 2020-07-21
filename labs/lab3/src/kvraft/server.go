@@ -25,6 +25,11 @@ type Op struct {
 	ReplyReceived []string
 }
 
+type NotifyMsg struct {
+	err Err
+	value string
+}
+
 const WaitReplyTimeOut = time.Millisecond * 500
 
 // used to describe a set using map
@@ -46,7 +51,7 @@ type KVServer struct {
 	db                map[string]string
 	putAppendFinished map[string]EmptyStruct
 	lastApplied       int
-	waitingOption     map[int]chan int
+	waitingOption     map[string]chan int
 	snapshotLastIncluded int
 }
 
@@ -122,31 +127,30 @@ func (kv *KVServer) waitResult(op Op) Err {
 	}
 
 	kv.mu.Lock()
-	kv.waitingOption[index] = ch
+	kv.waitingOption[op.OpId] = ch
 	kv.mu.Unlock()
-	log.Printf("Start waiting for %d\n", index)
-	defer log.Printf("%d finished\n", index)
+	DPrintf("Start waiting for %d\n", index)
+	defer DPrintf("%d finished\n", index)
 
-	timer := time.NewTimer(time.Millisecond * WaitReplyTimeOut)
+	timer := time.NewTimer(WaitReplyTimeOut)
 	defer timer.Stop()
 
 	resultTerm := -1
 	select {
-		// Looks like this won't fire...
 	case <-timer.C:
-		log.Println("Timeout")
+		//log.Printf("[%d] Timeout", kv.me)
 		kv.mu.Lock()
-		delete(kv.waitingOption, index)
+		delete(kv.waitingOption, op.OpId)
 		kv.mu.Unlock()
 		return ErrTimeOut
 	case term := <- ch:
 		kv.mu.Lock()
-		delete(kv.waitingOption, index)
+		delete(kv.waitingOption, op.OpId)
 		kv.mu.Unlock()
 		resultTerm = term
 	}
 
-	log.Printf("%d result term is %d", index, resultTerm)
+	//log.Printf("%d result term is %d", index, resultTerm)
 	if resultTerm == term {
 		return OK
 	} else {
@@ -157,20 +161,17 @@ func (kv *KVServer) waitResult(op Op) Err {
 func (kv *KVServer) chanListener() {
 	for msg := range kv.applyCh {
 		//DPrintf("[%d] Get msg from applyCh for op index %d", kv.me, msg.CommandIndex)
+		//log.Printf("[%d] chanListener acquires lock", kv.me)
 		kv.mu.Lock()
 
 		if msg.IsSnapshot {
 			kv.decodeSnapshot(msg)
-			for index, ch := range kv.waitingOption {
-				if index <= kv.snapshotLastIncluded {
-					ch <- -1
-				}
-			}
+			//log.Printf("[%d] chanListener released lock", kv.me)
 			kv.mu.Unlock()
 			continue
 		}
 
-		log.Printf("[%d] apply msg for op %d", kv.me, msg.CommandIndex)
+		//log.Printf("[%d] apply msg for op %d", kv.me, msg.CommandIndex)
 		if msg.Command != nil {
 			op := msg.Command.(Op)
 			_, finished := kv.putAppendFinished[op.OpId]
@@ -193,13 +194,18 @@ func (kv *KVServer) chanListener() {
 					go kv.removeReceived(op.ReplyReceived)
 				}
 			}
+
+			ch, waiting := kv.waitingOption[op.OpId]
+			if waiting {
+				select {
+				case <-time.After(10 * time.Millisecond):
+				case ch <- msg.CommandTerm:
+				}
+			}
 		}
 
-		ch, waiting := kv.waitingOption[msg.CommandIndex]
-		if waiting {
-			ch <- msg.CommandTerm
-		}
 		kv.lastApplied = msg.CommandIndex
+		//DPrintf("[%d] chanListener released lock", kv.me)
 		kv.mu.Unlock()
 		kv.cond.Broadcast()
 	}
@@ -301,7 +307,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.cond = sync.NewCond(&kv.mu)
 	kv.db = make(map[string]string)
 	kv.putAppendFinished = make(map[string]EmptyStruct)
-	kv.waitingOption = make(map[int]chan int)
+	kv.waitingOption = make(map[string]chan int)
 	go kv.chanListener()
 	if maxraftstate > 0 {
 		go kv.raftStateSizeMonitor()
