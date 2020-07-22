@@ -8,10 +8,10 @@ MIT 6.824 Distributed System course materials, labs, assignments.
     - [X] Lab 2A
     - [X] Lab 2B
     - [X] Lab 2C
-- [ ] Lab 3: KV Raft
-    - [ ] Lab 3A
-    - [ ] Lab 3B
-- [ ] Lab 4: Shared KV
+- [X] Lab 3: KV Raft
+    - [X] Lab 3A
+    - [X] Lab 3B
+- [ ] Lab 4: Sharded KV
     - [ ] Lab 4A
     - [ ] Lab 4B
     - [ ] Challenge 1
@@ -50,3 +50,7 @@ To ensure that nobody observes partially written files in the presence of crashe
 ### Lab 2: Raft
 
 #### Finished lab 2, will finish this specification later...
+
+### Lab 3: KV Raft
+
+#### A key-value storage system built on the top of Raft.
