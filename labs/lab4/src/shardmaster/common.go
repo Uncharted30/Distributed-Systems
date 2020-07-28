@@ -1,5 +1,7 @@
 package shardmaster
 
+import "log"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -19,6 +21,16 @@ package shardmaster
 
 // The number of shards.
 const NShards = 10
+
+// For debugging
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 // A configuration -- an assignment of shards to groups.
 // Please don't change this.
@@ -72,6 +84,8 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+	OpId string
+	ReplyReceived []string
 }
 
 type QueryReply struct {
