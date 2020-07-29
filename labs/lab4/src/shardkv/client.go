@@ -8,7 +8,11 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"strconv"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
 import "../shardmaster"
@@ -39,7 +43,10 @@ type Clerk struct {
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+	shardLastLeader [shardmaster.NShards]string
+	mu sync.Mutex
+	cid int64
+	replyReceived []string
 }
 
 //
@@ -66,11 +73,23 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
+	args := GetArgs{Key: key}
+	reply := GetReply{}
+
+	shard := key2shard(key)
+	DPrintf("Get request, key is %s", key)
+	server := ck.make_end(ck.shardLastLeader[shard])
+	ok := server.Call("KVServer.Get", &args, &reply)
+
+	if ok {
+		if reply.Err == OK {
+			return reply.Value
+		} else if reply.Err == ErrNoKey {
+			return ""
+		}
+	}
 
 	for {
-		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
@@ -79,6 +98,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.shardLastLeader[shard] = servers[si]
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
@@ -91,8 +111,6 @@ func (ck *Clerk) Get(key string) string {
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
-	return ""
 }
 
 //
@@ -100,11 +118,35 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
 
+	DPrintf("Put append request, key is %s, value is %s", key, value)
+
+	ck.mu.Lock()
+	args := PutAppendArgs{
+		Key:           key,
+		Value:         value,
+		Op:            op,
+		OpId:          ck.getNextOpId(),
+		ReplyReceived: ck.replyReceived,
+	}
+
+	ck.replyReceived = make([]string, 0)
+	ck.mu.Unlock()
+	reply := PutAppendReply{}
+	shard := key2shard(key)
+	DPrintf("Get request, key is %s", key)
+	server := ck.make_end(ck.shardLastLeader[shard])
+
+	ok := server.Call("KVServer.PutAppend", &args, &reply)
+
+	if ok {
+		if reply.Err == OK {
+			ck.mu.Lock()
+			ck.replyReceived = append(ck.replyReceived, args.OpId)
+			ck.mu.Unlock()
+			return
+		}
+	}
 
 	for {
 		shard := key2shard(key)
@@ -127,6 +169,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
+}
+
+func (ck *Clerk) getNextOpId() string {
+	return strconv.FormatInt(ck.cid, 10) + strconv.FormatInt(time.Now().UnixNano(), 10)
 }
 
 func (ck *Clerk) Put(key string, value string) {

@@ -234,7 +234,7 @@ func (sm *ShardMaster) chanListener() {
 			ch, waiting := sm.waitingReply[op.OpId]
 			if waiting {
 				select {
-				case <-time.After(10 * time.Millisecond):
+				case <-time.After(50 * time.Millisecond):
 				case ch <- res:
 				}
 			}
