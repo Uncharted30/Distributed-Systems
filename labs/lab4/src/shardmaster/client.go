@@ -42,13 +42,10 @@ func (ck *Clerk) getNextOpId() string {
 func (ck *Clerk) Query(num int) Config {
 
 	var reply QueryReply
-	ck.mu.Lock()
 	args := &QueryArgs{
 		Num:           num,
-		OpId:          ck.getNextOpId(),
-		ReplyReceived: ck.replyReceived,
 	}
-	ck.replyReceived = make([]string, 0)
+	ck.mu.Lock()
 	lastLeader := ck.lastLeader
 	ck.mu.Unlock()
 

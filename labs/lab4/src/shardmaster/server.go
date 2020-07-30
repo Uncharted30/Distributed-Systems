@@ -122,8 +122,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		return
 	}
 
-	op := Op{
-		OpId:   args.OpId,
+	op := Op {
 		OpType: Query,
 		Num:    args.Num,
 	}
@@ -212,6 +211,9 @@ func (sm *ShardMaster) chanListener() {
 			}
 
 			if !finished {
+				if op.OpId != "" {
+					sm.requestFinished[op.OpId] = struct{}{}
+				}
 				if op.OpType == Join {
 					sm.serverJoin(op.Servers)
 				} else if op.OpType == Leave {
@@ -509,6 +511,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.configs[0].Groups = map[int][]string{}
 	sm.shardAssign = make([][]int, 1)
 	sm.waitingReply = make(map[string]chan Result)
+	sm.requestFinished = make(map[string]struct{})
 	for i := 0; i < NShards; i++ {
 		sm.configs[0].Shards[i] = 0
 		sm.shardAssign[0] = append(sm.shardAssign[0], i)
