@@ -7,17 +7,17 @@ import (
 	"../shardmaster"
 	"bytes"
 	"log"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 const (
-	GET        = 1
-	PUT        = 2
-	APPEND     = 3
-	MOVE_SHARD = 4
+	GET    = 1
+	PUT    = 2
+	APPEND = 3
+	CONFIG = 4
+	SHARD  = 5
 )
 
 type Op struct {
@@ -25,9 +25,16 @@ type Op struct {
 	Key           string
 	Value         string
 	OpId          string
+	ConfigNum     int
 	ReplyReceived []string
-	data          map[string]string
-	shard         int
+	Config        shardmaster.Config
+	Data          map[string]string
+	Shard         int
+}
+
+type AgreeResult struct {
+	term      int
+	configNum int
 }
 
 type NotifyMsg struct {
@@ -53,31 +60,45 @@ type ShardKV struct {
 	masters      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 
-	cond                   *sync.Cond
-	db                     map[string]string
-	putAppendFinished      map[string]string
-	lastApplied            int
-	waitingOption          map[string]chan int
-	snapshotLastIncluded   int
-	configQueue            []shardmaster.Config
-	configQueueLock        sync.Mutex
-	config                 shardmaster.Config
-	shards                 map[int]struct{}
-	lastMasterLeader       int
+	cond                 *sync.Cond
+	db                   map[string]string
+	putAppendFinished    map[string]string
+	lastApplied          int
+	waitingOption        map[string]chan AgreeResult
+	snapshotLastIncluded int
+	config               shardmaster.Config
+	configHistory        map[int]shardmaster.Config
+	shards               map[int]struct{}
+	shardsToFetch        map[int]struct{}
+	lastMasterLeader     int
+	// config num -> shardId -> data
+	shardHistory map[int]map[int]map[string]string
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	_, isLeader := kv.rf.GetState()
+	shard := key2shard(args.Key)
+	kv.mu.Lock()
+	_, hasShard := kv.shards[shard]
+	configNum := kv.config.Num
+	kv.mu.Unlock()
 
-	if !isLeader {
-		reply.Err = ErrWrongLeader
+	if !hasShard {
+		DPrintf("No shard!")
+		reply.Err = ErrWrongGroup
 		return
 	}
+	//_, isLeader := kv.rf.GetState()
+	//
+	//if !isLeader {
+	//	reply.Err = ErrWrongLeader
+	//	return
+	//}
 
 	op := Op{
-		OpType: GET,
-		Key:    args.Key,
+		OpType:    GET,
+		Key:       args.Key,
+		ConfigNum: configNum,
 	}
 
 	res := kv.waitResult(op)
@@ -97,11 +118,20 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	shard := key2shard(args.Key)
 	kv.mu.Lock()
 	_, finished := kv.putAppendFinished[args.OpId]
+	_, hasShard := kv.shards[shard]
+	configNum := kv.config.Num
 	kv.mu.Unlock()
+
 	if finished {
 		reply.Err = OK
+		return
+	}
+
+	if !hasShard {
+		reply.Err = ErrWrongGroup
 		return
 	}
 
@@ -116,6 +146,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Value:         args.Value,
 		ReplyReceived: args.ReplyReceived,
 		OpId:          args.OpId,
+		ConfigNum:     configNum,
 	}
 
 	if args.Op == "Put" {
@@ -131,7 +162,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *ShardKV) waitResult(op Op) Err {
 
-	ch := make(chan int, 1)
+	ch := make(chan AgreeResult, 1)
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		return ErrWrongLeader
@@ -146,7 +177,7 @@ func (kv *ShardKV) waitResult(op Op) Err {
 	timer := time.NewTimer(WaitReplyTimeOut)
 	defer timer.Stop()
 
-	resultTerm := -1
+	var result AgreeResult
 	select {
 	case <-timer.C:
 		//log.Printf("[%d] Timeout", kv.me)
@@ -154,16 +185,22 @@ func (kv *ShardKV) waitResult(op Op) Err {
 		delete(kv.waitingOption, op.OpId)
 		kv.mu.Unlock()
 		return ErrTimeOut
-	case t := <-ch:
+	case r := <-ch:
 		kv.mu.Lock()
 		delete(kv.waitingOption, op.OpId)
 		kv.mu.Unlock()
-		resultTerm = t
+		result = r
 	}
 
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	//log.Printf("%d result term is %d", index, resultTerm)
-	if resultTerm == term {
-		return OK
+	if result.term == term {
+		if result.configNum == kv.config.Num {
+			return OK
+		} else {
+			return ErrWrongGroup
+		}
 	} else {
 		return ErrWrongLeader
 	}
@@ -182,12 +219,16 @@ func (kv *ShardKV) chanListener() {
 			continue
 		}
 
+		result := AgreeResult{}
+		result.term = msg.CommandTerm
+
 		//log.Printf("[%d] apply msg for op %d", kv.me, msg.CommandIndex)
 		if msg.Command != nil {
 			op := msg.Command.(Op)
 			_, finished := kv.putAppendFinished[op.OpId]
+			result.configNum = op.ConfigNum
 
-			if !finished {
+			if !finished && op.ConfigNum == kv.config.Num {
 				if op.OpType == PUT {
 					kv.db[op.Key] = op.Value
 					kv.putAppendFinished[op.OpId] = op.Key
@@ -199,9 +240,18 @@ func (kv *ShardKV) chanListener() {
 						kv.db[op.Key] = op.Value
 					}
 					kv.putAppendFinished[op.OpId] = op.Key
-				} else if op.OpType == MOVE_SHARD {
-					for k, v := range op.data {
-						kv.db[k] = v
+				} else if op.OpType == CONFIG {
+					if op.Config.Num == kv.config.Num+1 {
+						DPrintf("[%d-%d] Apply new config: %d", kv.gid, kv.me, op.Config.Num)
+						kv.archiveShard(op.Config)
+						kv.configHistory[kv.config.Num] = kv.config
+						kv.config = op.Config
+					}
+				} else if op.OpType == SHARD {
+					if _, ok := kv.shardsToFetch[op.Shard]; ok {
+						kv.mergeShard(op.Data)
+						kv.shards[op.Shard] = struct{}{}
+						delete(kv.shardsToFetch, op.Shard)
 					}
 				}
 
@@ -214,7 +264,7 @@ func (kv *ShardKV) chanListener() {
 			if waiting {
 				select {
 				case <-time.After(10 * time.Millisecond):
-				case ch <- msg.CommandTerm:
+				case ch <- result:
 				}
 			}
 		}
@@ -274,162 +324,181 @@ func (kv *ShardKV) raftStateSizeMonitor() {
 
 func (kv *ShardKV) configChangeMonitor() {
 	for !kv.killed() {
-		var args shardmaster.QueryArgs
-		var reply shardmaster.QueryReply
-		args.Num = -1
+		kv.mu.Lock()
+		if len(kv.shardsToFetch) > 0 {
+			if _, isLeader := kv.rf.GetState(); isLeader {
+				kv.fetchShards()
+			}
+			kv.mu.Unlock()
+		} else {
+			latestConfig := kv.config
+			kv.mu.Unlock()
 
-		ok := kv.masters[kv.lastMasterLeader].Call("ShardMaster.Query", &args, &reply)
+			res := kv.queryAndUpdateConfig(latestConfig.Num+1, kv.lastMasterLeader)
+			if res {
+				continue
+			}
 
-		if ok {
-			if reply.Err == OK {
-				kv.mu.Lock()
-				if kv.config.Num < reply.Config.Num {
-					kv.configQueueLock.Lock()
-					kv.configQueue = append(kv.configQueue, reply.Config)
-					kv.configQueueLock.Unlock()
+			finished := false
+			for !finished {
+				for i := range kv.masters {
+					res = kv.queryAndUpdateConfig(latestConfig.Num+1, i)
+					if res {
+						finished = true
+						break
+					}
 				}
-				kv.mu.Unlock()
-				return
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 
-		for {
-			for i, master := range kv.masters {
-				ok := master.Call("ShardMaster.Query", &args, &reply)
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (kv *ShardKV) queryAndUpdateConfig(num int, server int) bool {
+	var args shardmaster.QueryArgs
+	var reply shardmaster.QueryReply
+	args.Num = num
+	ok := kv.masters[server].Call("ShardMaster.Query", &args, &reply)
+
+	if ok {
+		if reply.Err == OK {
+			kv.mu.Lock()
+			if kv.config.Num+1 == reply.Config.Num {
+				if len(kv.shardsToFetch) == 0 {
+					kv.startAgreeOnConfig(reply.Config)
+				}
+			}
+			kv.mu.Unlock()
+			kv.lastMasterLeader = server
+			return true
+		}
+	}
+
+	return false
+}
+
+func (kv *ShardKV) startAgreeOnConfig(config shardmaster.Config) {
+	configNum := kv.config.Num
+	op := Op{
+		OpType:    CONFIG,
+		Config:    config,
+		ConfigNum: configNum,
+	}
+	kv.rf.Start(op)
+}
+
+func (kv *ShardKV) fetchShards() {
+	for shard := range kv.shardsToFetch {
+		from := kv.configHistory[kv.config.Num-1].Shards[shard]
+		go func(shard int, from int) {
+			DPrintf("[%d-%d] fetching shard: %d", kv.me, kv.gid, shard)
+			kv.mu.Lock()
+			configNum := kv.config.Num
+			kv.mu.Unlock()
+			args := FetchShardsArgs{
+				ConfigNum: configNum,
+				Shard:     shard,
+			}
+
+			for _, server := range kv.configHistory[kv.config.Num-1].Groups[from] {
+				reply := FetchShardsReply{}
+				DPrintf("[%d-%d] waiting fetching shard: %d", kv.me, kv.gid, shard)
+				ok := kv.make_end(server).Call("ShardKV.FetchShard", &args, &reply)
+
 				if ok {
+					DPrintf("[%d-%d] fetching shard reply: %s", kv.me, kv.gid, reply.Err)
 					if reply.Err == OK {
-						kv.mu.Lock()
-						if kv.config.Num < reply.Config.Num {
-							kv.configQueueLock.Lock()
-							kv.configQueue = append(kv.configQueue, reply.Config)
-							kv.configQueueLock.Unlock()
+						op := Op{
+							OpType:    SHARD,
+							Data:      reply.Data,
+							Shard:     shard,
+							ConfigNum: configNum,
 						}
-						kv.mu.Unlock()
-						kv.lastMasterLeader = i
+						kv.rf.Start(op)
 						return
 					}
-				}
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-}
-
-func (kv *ShardKV) newConfigApplier() {
-	for {
-		kv.mu.Lock()
-		if len(kv.configQueue) > 0 {
-			nextShards := make(map[int]struct{})
-			// key: shard, value: gid
-			move := make(map[int]struct{})
-			nextConfig := kv.configQueue[0]
-			if _, ok := nextConfig.Groups[kv.gid]; ok {
-				for shardId := range kv.shards {
-					// see if this shard is still on this group
-					if nextConfig.Shards[shardId] == kv.gid {
-						nextShards[shardId] = struct{}{}
-					} else {
-						move[shardId] = struct{}{}
-					}
-				}
-			}
-
-			// key: shard, value: data
-			shards := make(map[int]map[string]string)
-			for k, v := range kv.db {
-				shardOfKey := key2shard(k)
-				if _, ok := move[shardOfKey]; ok {
-					shards[shardOfKey][k] = v
-					delete(kv.db, k)
-				}
-			}
-
-			// key: shard, value: putAppend request which is finished but not acknowledged
-			shardsPutAppendFinished := make(map[int]map[string]string)
-			newPutAppendFinished := make(map[string]string)
-			for opId, key := range kv.putAppendFinished {
-				shardOfKey := key2shard(key)
-				if _, ok := move[shardOfKey]; ok {
-					if _, ok := shardsPutAppendFinished[shardOfKey]; !ok {
-						shardsPutAppendFinished[shardOfKey] = make(map[string]string)
-					}
-					shardsPutAppendFinished[shardOfKey][opId] = key
 				} else {
-					newPutAppendFinished[opId] = key
+					DPrintf("[%d-%d] fetching shard failed", kv.me, kv.gid)
+					//log.Println("[%d-%d] ", )
 				}
 			}
-			kv.putAppendFinished = newPutAppendFinished
-			kv.shards = nextShards
-			kv.mu.Unlock()
-
-			kv.sendShardToOtherGroups(shards, shardsPutAppendFinished, nextConfig)
-			kv.mu.Lock()
-			kv.configQueueLock.Lock()
-			kv.config = nextConfig
-			kv.configQueue = kv.configQueue[1:]
-			kv.configQueueLock.Unlock()
-			kv.mu.Unlock()
-		}
-
-		time.Sleep(100 * time.Millisecond)
+		}(shard, from)
 	}
 }
 
-func (kv *ShardKV) sendShardToOtherGroups(shardsToSend map[int]map[string]string,
-	shardsPutAppendFinished map[int]map[string]string, config shardmaster.Config) {
-	var wg sync.WaitGroup
-	for shard, data := range shardsToSend {
-		wg.Add(1)
-		go kv.sendShard(config.Shards[shard], shard, data, shardsPutAppendFinished[shard], config, &wg)
-	}
-	wg.Wait()
-}
+func (kv *ShardKV) archiveShard(config shardmaster.Config) {
+	// shards need to be fetched
+	nextShardsToFetch := make(map[int]struct{})
+	// shards to server in next config
+	nextShards := make(map[int]struct{})
 
-func (kv *ShardKV) sendShard(gid int, shard int, data map[string]string,
-	shardPutAppendFinished map[string]string, config shardmaster.Config, wg *sync.WaitGroup) {
-	opId := strconv.Itoa(kv.gid) + strconv.FormatInt(time.Now().UnixNano(), 10)
-	args := MoveShardArgs{
-		Shard:                  shard,
-		Data:                   data,
-		OpId:                   opId,
-		ShardPutAppendFinished: shardPutAppendFinished,
-	}
-
-	for {
-		for _, serverId := range config.Groups[gid] {
-			reply := MoveShardReply{}
-			ok := kv.make_end(serverId).Call("ShardKV.MoveShard", &args, &reply)
-
-			if ok {
-				if reply.Err == OK {
-					wg.Done()
-					return
-				}
+	if config.Num == 1 {
+		for shard, group := range config.Shards {
+			if group == kv.gid {
+				nextShards[shard] = struct{}{}
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+	} else {
+		// shard to be archived
+		move := make(map[int]struct{})
+		if _, ok := config.Groups[kv.gid]; ok {
+			for shard, group := range config.Shards {
+				if group == kv.gid {
+					nextShardsToFetch[shard] = struct{}{}
+				}
+			}
+
+			for shardId := range kv.shards {
+				// see if this shard is still on this group
+				if config.Shards[shardId] == kv.gid {
+					nextShards[shardId] = struct{}{}
+					delete(nextShardsToFetch, shardId)
+				} else {
+					move[shardId] = struct{}{}
+				}
+			}
+		} else {
+			move = kv.shards
+		}
+
+		kv.shardHistory[config.Num] = make(map[int]map[string]string)
+
+		// key: shard, value: data
+		for k, v := range kv.db {
+			shardOfKey := key2shard(k)
+			if _, ok := move[shardOfKey]; ok {
+				if _, ok := kv.shardHistory[config.Num][shardOfKey]; !ok {
+					kv.shardHistory[config.Num][shardOfKey] = make(map[string]string)
+				}
+				kv.shardHistory[config.Num][shardOfKey][k] = v
+				delete(kv.db, k)
+			}
+		}
+
+	}
+
+	kv.shards = nextShards
+	kv.shardsToFetch = nextShardsToFetch
+}
+
+func (kv *ShardKV) mergeShard(data map[string]string) {
+	for k, v := range data {
+		kv.db[k] = v
 	}
 }
 
-func (kv *ShardKV) MoveShard(args *MoveShardArgs, reply *MoveShardReply) {
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-
-	op := Op{
-		OpType:        MOVE_SHARD,
-		OpId:          args.OpId,
-		data:          args.Data,
-		shard:         args.Shard,
-	}
-
+func (kv *ShardKV) FetchShard(args *FetchShardsArgs, reply *FetchShardsReply) {
 	kv.mu.Lock()
-
-	res := kv.waitResult(op)
-
-	reply.Err = res
+	defer kv.mu.Unlock()
+	if history, ok := kv.shardHistory[args.ConfigNum]; ok {
+		reply.Err = OK
+		reply.Data = history[args.Shard]
+	} else {
+		reply.Err = ErrConfigNoMatch
+	}
+	return
 }
 
 //
@@ -467,7 +536,8 @@ func (kv *ShardKV) killed() bool {
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *ShardKV {
+func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int,
+	gid int, masters []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
@@ -482,7 +552,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.cond = sync.NewCond(&kv.mu)
 	kv.db = make(map[string]string)
 	kv.putAppendFinished = make(map[string]string)
-	kv.waitingOption = make(map[string]chan int)
+	kv.waitingOption = make(map[string]chan AgreeResult)
+	kv.gid = gid
+	kv.masters = masters
+	kv.make_end = make_end
+	kv.configHistory = make(map[int]shardmaster.Config)
+	kv.shardHistory = make(map[int]map[int]map[string]string)
+	DPrintf("[%d-%d] initial config: %d", kv.me, kv.gid, kv.config.Num)
 	go kv.chanListener()
 	if maxraftstate > 0 {
 		go kv.raftStateSizeMonitor()

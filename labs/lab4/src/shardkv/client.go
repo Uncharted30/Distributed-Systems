@@ -60,20 +60,20 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 //
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{Key: key}
-	reply := GetReply{}
+	//reply := GetReply{}
 
 	shard := key2shard(key)
 	DPrintf("Get request, key is %s", key)
-	server := ck.make_end(ck.shardLastLeader[shard])
-	ok := server.Call("KVServer.Get", &args, &reply)
-
-	if ok {
-		if reply.Err == OK {
-			return reply.Value
-		} else if reply.Err == ErrNoKey {
-			return ""
-		}
-	}
+	//server := ck.make_end(ck.shardLastLeader[shard])
+	//ok := server.Call("ShardKV.Get", &args, &reply)
+	//
+	//if ok {
+	//	if reply.Err == OK {
+	//		return reply.Value
+	//	} else if reply.Err == ErrNoKey {
+	//		return ""
+	//	}
+	//}
 
 	for {
 		gid := ck.config.Shards[shard]
@@ -95,7 +95,7 @@ func (ck *Clerk) Get(key string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		ck.config = ck.sm.Query(ck.config.Num + 1)
 	}
 }
 
@@ -123,7 +123,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	DPrintf("Get request, key is %s", key)
 	server := ck.make_end(ck.shardLastLeader[shard])
 
-	ok := server.Call("KVServer.PutAppend", &args, &reply)
+	ok := server.Call("ShardKV.PutAppend", &args, &reply)
 
 	if ok {
 		if reply.Err == OK {
@@ -135,14 +135,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 
 	for {
-		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				//log.Println(reply.Err)
 				if ok && reply.Err == OK {
+					ck.shardLastLeader[shard] = servers[si]
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
@@ -153,7 +154,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		ck.config = ck.sm.Query(ck.config.Num + 1)
 	}
 }
 

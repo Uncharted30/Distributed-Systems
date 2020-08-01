@@ -13,7 +13,7 @@ import "../shardmaster"
 //
 
 // For debugging
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -23,11 +23,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrTimeOut     = "ErrTimeOut"
+	OK               = "OK"
+	ErrNoKey         = "ErrNoKey"
+	ErrWrongGroup    = "ErrWrongGroup"
+	ErrWrongLeader   = "ErrWrongLeader"
+	ErrTimeOut       = "ErrTimeOut"
+	ErrConfigNoMatch = "ConfigNoMatch"
+	ErrConfigPast    = "ConfigPast"
 )
 
 type Err string
@@ -79,4 +81,14 @@ type MoveShardArgs struct {
 
 type MoveShardReply struct {
 	Err Err
+}
+
+type FetchShardsArgs struct {
+	ConfigNum int
+	Shard     int
+}
+
+type FetchShardsReply struct {
+	Err  Err
+	Data map[string]string
 }

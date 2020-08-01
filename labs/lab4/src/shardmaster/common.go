@@ -40,17 +40,33 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (c *Config) Copy() Config {
+	//var ss [NShards]int
+	//for i, v := range c.Shards {
+	//	ss[i] = v
+	//}
+	config := Config{
+		Num:    c.Num,
+		Shards: c.Shards,
+		Groups: make(map[int][]string),
+	}
+	for gid, s := range c.Groups {
+		config.Groups[gid] = append([]string{}, s...)
+	}
+	return config
+}
+
 const (
-	OK = "OK"
-	ErrTimeOut = "Timeout"
-	ErrWrongLeader = "WrongLeader"
+	OK               = "OK"
+	ErrTimeOut       = "Timeout"
+	ErrWrongLeader   = "WrongLeader"
 )
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
-	OpId string
+	Servers       map[int][]string // new GID -> servers mappings
+	OpId          string
 	ReplyReceived []string
 }
 
@@ -60,8 +76,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
-	OpId string
+	GIDs          []int
+	OpId          string
 	ReplyReceived []string
 }
 
@@ -71,9 +87,9 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
-	OpId string
+	Shard         int
+	GID           int
+	OpId          string
 	ReplyReceived []string
 }
 

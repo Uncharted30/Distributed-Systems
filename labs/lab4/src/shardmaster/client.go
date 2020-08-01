@@ -7,7 +7,6 @@ package shardmaster
 import (
 	"../labrpc"
 	"strconv"
-	"sync"
 )
 import "time"
 import "crypto/rand"
@@ -16,7 +15,6 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	lastLeader int
-	mu sync.Mutex
 	cid int64
 	replyReceived []string
 }
@@ -45,9 +43,7 @@ func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{
 		Num:           num,
 	}
-	ck.mu.Lock()
 	lastLeader := ck.lastLeader
-	ck.mu.Unlock()
 
 	ok := ck.servers[lastLeader].Call("ShardMaster.Query", args, &reply)
 	if ok && reply.Err == OK {
@@ -60,9 +56,7 @@ func (ck *Clerk) Query(num int) Config {
 			var reply QueryReply
 			ok := srv.Call("ShardMaster.Query", args, &reply)
 			if ok && reply.Err == OK {
-				ck.mu.Lock()
 				ck.lastLeader = i
-				ck.mu.Unlock()
 				return reply.Config
 			}
 		}
@@ -73,7 +67,6 @@ func (ck *Clerk) Query(num int) Config {
 func (ck *Clerk) Join(servers map[int][]string) {
 
 	var reply JoinReply
-	ck.mu.Lock()
 	args := &JoinArgs{
 		Servers:       servers,
 		OpId:          ck.getNextOpId(),
@@ -81,7 +74,6 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	}
 	ck.replyReceived = make([]string, 0)
 	lastLeader := ck.lastLeader
-	ck.mu.Unlock()
 
 	ok := ck.servers[lastLeader].Call("ShardMaster.Join", args, &reply)
 	if ok && reply.Err == OK {
@@ -94,9 +86,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 			var reply JoinReply
 			ok := srv.Call("ShardMaster.Join", args, &reply)
 			if ok && reply.Err == OK {
-				ck.mu.Lock()
 				ck.lastLeader = i
-				ck.mu.Unlock()
 				return
 			}
 		}
@@ -106,7 +96,6 @@ func (ck *Clerk) Join(servers map[int][]string) {
 
 func (ck *Clerk) Leave(gids []int) {
 	var reply LeaveReply
-	ck.mu.Lock()
 	args := &LeaveArgs{
 		GIDs:          gids,
 		OpId:          ck.getNextOpId(),
@@ -114,7 +103,6 @@ func (ck *Clerk) Leave(gids []int) {
 	}
 	lastLeader := ck.lastLeader
 	ck.replyReceived = make([]string, 0)
-	ck.mu.Unlock()
 
 	ok := ck.servers[lastLeader].Call("ShardMaster.Leave", args, &reply)
 	if ok && reply.Err == OK {
@@ -127,9 +115,7 @@ func (ck *Clerk) Leave(gids []int) {
 			var reply LeaveReply
 			ok := srv.Call("ShardMaster.Leave", args, &reply)
 			if ok && reply.Err == OK {
-				ck.mu.Lock()
 				ck.lastLeader = i
-				ck.mu.Unlock()
 				return
 			}
 		}
@@ -139,7 +125,6 @@ func (ck *Clerk) Leave(gids []int) {
 
 func (ck *Clerk) Move(shard int, gid int) {
 	var reply MoveReply
-	ck.mu.Lock()
 	args := &MoveArgs{
 		Shard:         shard,
 		GID:           gid,
@@ -148,7 +133,6 @@ func (ck *Clerk) Move(shard int, gid int) {
 	}
 	ck.replyReceived = make([]string, 0)
 	lastLeader := ck.lastLeader
-	ck.mu.Unlock()
 
 	ok := ck.servers[lastLeader].Call("ShardMaster.Move", args, &reply)
 	if ok && reply.Err == OK {
@@ -161,9 +145,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 			var reply MoveReply
 			ok := srv.Call("ShardMaster.Move", args, &reply)
 			if ok && reply.Err == OK {
-				ck.mu.Lock()
 				ck.lastLeader = i
-				ck.mu.Unlock()
 				return
 			}
 		}
