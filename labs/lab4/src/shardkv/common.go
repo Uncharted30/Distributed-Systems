@@ -13,7 +13,7 @@ import "../shardmaster"
 //
 
 // For debugging
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -72,23 +72,13 @@ type GetReply struct {
 	Value string
 }
 
-type MoveShardArgs struct {
-	ShardPutAppendFinished map[string]string
-	OpId                   string
-	Shard                  int
-	Data                   map[string]string
-}
-
-type MoveShardReply struct {
-	Err Err
-}
-
 type FetchShardsArgs struct {
 	ConfigNum int
 	Shard     int
 }
 
 type FetchShardsReply struct {
-	Err  Err
-	Data map[string]string
+	Err               Err
+	Data              map[string]string
+	PutAppendFinished map[string]string
 }

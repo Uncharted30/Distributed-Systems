@@ -48,6 +48,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
+	ck.cid = nrand()
 	// You'll have to add code here.
 	return ck
 }

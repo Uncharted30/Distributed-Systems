@@ -28,7 +28,8 @@ type Op struct {
 	ConfigNum     int
 	ReplyReceived []string
 	Config        shardmaster.Config
-	Data          map[string]string
+	ShardFinished map[string]string
+	ShardData     map[string]string
 	Shard         int
 }
 
@@ -72,7 +73,8 @@ type ShardKV struct {
 	shardsToFetch        map[int]struct{}
 	lastMasterLeader     int
 	// config num -> shardId -> data
-	shardHistory map[int]map[int]map[string]string
+	shardHistory             map[int]map[int]map[string]string
+	putAppendFinishedHistory map[int]map[int]map[string]string
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -88,12 +90,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongGroup
 		return
 	}
-	//_, isLeader := kv.rf.GetState()
-	//
-	//if !isLeader {
-	//	reply.Err = ErrWrongLeader
-	//	return
-	//}
+
+	_, isLeader := kv.rf.GetState()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
 
 	op := Op{
 		OpType:    GET,
@@ -248,8 +251,8 @@ func (kv *ShardKV) chanListener() {
 						kv.config = op.Config
 					}
 				} else if op.OpType == SHARD {
-					if _, ok := kv.shardsToFetch[op.Shard]; ok {
-						kv.mergeShard(op.Data)
+					if _, ok := kv.shardsToFetch[op.Shard]; op.ConfigNum == kv.config.Num && ok {
+						kv.mergeShard(op.ShardData, op.ShardFinished)
 						kv.shards[op.Shard] = struct{}{}
 						delete(kv.shardsToFetch, op.Shard)
 					}
@@ -285,6 +288,12 @@ func (kv *ShardKV) snapshot() {
 	encoder.Encode(kv.db)
 	encoder.Encode(kv.putAppendFinished)
 	encoder.Encode(kv.snapshotLastIncluded)
+	encoder.Encode(kv.config)
+	encoder.Encode(kv.shards)
+	encoder.Encode(kv.shardsToFetch)
+	encoder.Encode(kv.shardHistory)
+	encoder.Encode(kv.configHistory)
+	encoder.Encode(kv.putAppendFinishedHistory)
 	index := kv.lastApplied
 	kv.mu.Unlock()
 	kv.rf.Snapshot(w.Bytes(), index)
@@ -294,13 +303,40 @@ func (kv *ShardKV) decodeSnapshot(msg raft.ApplyMsg) {
 
 	r := bytes.NewBuffer(msg.Command.([]byte))
 	decoder := labgob.NewDecoder(r)
-	err1 := decoder.Decode(&kv.db)
-	err2 := decoder.Decode(&kv.putAppendFinished)
-	err3 := decoder.Decode(&kv.snapshotLastIncluded)
+	var db map[string]string
+	var putAppendFinished map[string]string
+	var snapshotLastIncluded int
+	var config shardmaster.Config
+	var shards map[int]struct{}
+	var shardsToFetch map[int]struct{}
+	var shardHistory map[int]map[int]map[string]string
+	var configHistory map[int]shardmaster.Config
+	var putAppendFinishedHistory map[int]map[int]map[string]string
 
-	if err1 != nil || err2 != nil || err3 != nil {
+	err1 := decoder.Decode(&db)
+	err2 := decoder.Decode(&putAppendFinished)
+	err3 := decoder.Decode(&snapshotLastIncluded)
+	err4 := decoder.Decode(&config)
+	err5 := decoder.Decode(&shards)
+	err6 := decoder.Decode(&shardsToFetch)
+	err7 := decoder.Decode(&shardHistory)
+	err8 := decoder.Decode(&configHistory)
+	err9 := decoder.Decode(&putAppendFinishedHistory)
+
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil ||
+		err5 != nil || err6 != nil || err7 != nil || err8 != nil || err9 != nil {
 		log.Fatalf("Failed to decode snapshot")
 	}
+
+	kv.db = db
+	kv.putAppendFinished = putAppendFinished
+	kv.snapshotLastIncluded = snapshotLastIncluded
+	kv.config = config
+	kv.shards = shards
+	kv.shardsToFetch = shardsToFetch
+	kv.shardHistory = shardHistory
+	kv.configHistory = configHistory
+	kv.putAppendFinishedHistory = putAppendFinishedHistory
 }
 
 func (kv *ShardKV) removeReceived(opIds []string) {
@@ -324,11 +360,13 @@ func (kv *ShardKV) raftStateSizeMonitor() {
 
 func (kv *ShardKV) configChangeMonitor() {
 	for !kv.killed() {
+		_, isLeader := kv.rf.GetState()
+		if !isLeader {
+			continue
+		}
 		kv.mu.Lock()
 		if len(kv.shardsToFetch) > 0 {
-			if _, isLeader := kv.rf.GetState(); isLeader {
-				kv.fetchShards()
-			}
+			kv.fetchShards()
 			kv.mu.Unlock()
 		} else {
 			latestConfig := kv.config
@@ -392,11 +430,9 @@ func (kv *ShardKV) startAgreeOnConfig(config shardmaster.Config) {
 func (kv *ShardKV) fetchShards() {
 	for shard := range kv.shardsToFetch {
 		from := kv.configHistory[kv.config.Num-1].Shards[shard]
+		configNum := kv.config.Num
 		go func(shard int, from int) {
 			DPrintf("[%d-%d] fetching shard: %d", kv.me, kv.gid, shard)
-			kv.mu.Lock()
-			configNum := kv.config.Num
-			kv.mu.Unlock()
 			args := FetchShardsArgs{
 				ConfigNum: configNum,
 				Shard:     shard,
@@ -411,16 +447,17 @@ func (kv *ShardKV) fetchShards() {
 					DPrintf("[%d-%d] fetching shard reply: %s", kv.me, kv.gid, reply.Err)
 					if reply.Err == OK {
 						op := Op{
-							OpType:    SHARD,
-							Data:      reply.Data,
-							Shard:     shard,
-							ConfigNum: configNum,
+							OpType:        SHARD,
+							ShardData:     reply.Data,
+							Shard:         shard,
+							ConfigNum:     configNum,
+							ShardFinished: reply.PutAppendFinished,
 						}
 						kv.rf.Start(op)
 						return
 					}
 				} else {
-					DPrintf("[%d-%d] fetching shard failed", kv.me, kv.gid)
+					DPrintf("[%d-%d] fetch shard failed", kv.me, kv.gid)
 					//log.Println("[%d-%d] ", )
 				}
 			}
@@ -477,15 +514,30 @@ func (kv *ShardKV) archiveShard(config shardmaster.Config) {
 			}
 		}
 
+		kv.putAppendFinishedHistory[config.Num] = make(map[int]map[string]string)
+		for opId, key := range kv.putAppendFinished {
+			shardOfKey := key2shard(key)
+			if _, ok := move[shardOfKey]; ok {
+				if _, ok := kv.putAppendFinishedHistory[config.Num][shardOfKey]; !ok {
+					kv.putAppendFinishedHistory[config.Num][shardOfKey] = make(map[string]string)
+				}
+				kv.putAppendFinishedHistory[config.Num][shardOfKey][opId] = key
+				delete(kv.putAppendFinished, opId)
+			}
+		}
 	}
 
 	kv.shards = nextShards
 	kv.shardsToFetch = nextShardsToFetch
 }
 
-func (kv *ShardKV) mergeShard(data map[string]string) {
+func (kv *ShardKV) mergeShard(data map[string]string, putAppendFinished map[string]string) {
 	for k, v := range data {
 		kv.db[k] = v
+	}
+
+	for opId, key := range putAppendFinished {
+		kv.putAppendFinished[opId] = key
 	}
 }
 
@@ -495,6 +547,7 @@ func (kv *ShardKV) FetchShard(args *FetchShardsArgs, reply *FetchShardsReply) {
 	if history, ok := kv.shardHistory[args.ConfigNum]; ok {
 		reply.Err = OK
 		reply.Data = history[args.Shard]
+		reply.PutAppendFinished = kv.putAppendFinishedHistory[args.ConfigNum][args.Shard]
 	} else {
 		reply.Err = ErrConfigNoMatch
 	}
@@ -558,6 +611,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.make_end = make_end
 	kv.configHistory = make(map[int]shardmaster.Config)
 	kv.shardHistory = make(map[int]map[int]map[string]string)
+	kv.putAppendFinishedHistory = make(map[int]map[int]map[string]string)
 	DPrintf("[%d-%d] initial config: %d", kv.me, kv.gid, kv.config.Num)
 	go kv.chanListener()
 	if maxraftstate > 0 {
